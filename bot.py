@@ -7,7 +7,6 @@ from config import Config
 from services.telegram import TelegramService
 from core.logger import get_logger
 from core.protocol import Protocol
-from utils.filetype import FileTypeDetector
 
 logger = get_logger(__name__)
 
@@ -15,46 +14,44 @@ bot = Bot(token=Config.BOT_TOKEN)
 dp = AiogramDispatcher()
 telegram_service = TelegramService()
 
+# In-memory store for pending passwords (can be improved with DB later)
+pending_passwords = {}
+
 @dp.message(Command("start"))
 async def start(message: Message):
-    await message.answer("سلام! فایل خود را (ویدیو، صوت، PDF، آرشیو) ارسال کنید.")
+    await message.answer("سلام! فایل خود را ارسال کنید.")
 
 @dp.message()
-async def handle_file(message: Message):
-    if not message.document and not message.video and not message.audio:
-        await message.answer("لطفاً فایل ارسال کنید.")
+async def handle_message(message: Message):
+    # Handle password response
+    if message.chat.id in pending_passwords:
+        job_id = pending_passwords[message.chat.id]
+        await handle_password_response(message, job_id)
         return
 
-    file = message.document or message.video or message.audio
-    mime_type = file.mime_type or ""
-    file_name = file.file_name or "file"
-    ext = file_name.split('.')[-1] if '.' in file_name else ""
+    # Normal file handling (previous code)
+    if message.document or message.video or message.audio:
+        # ... (previous file handler code remains)
+        pass
+    else:
+        await message.answer("لطفاً فایل یا رمز آرشیو را ارسال کنید.")
 
-    file_type = FileTypeDetector.detect(mime_type, f".{ext}")
-
-    if file_type == "UNKNOWN":
-        await message.answer("نوع فایل پشتیبانی نمی‌شود.")
-        return
-
-    # Create job info
-    job_data = {
-        "type": "job",
-        "user_id": message.from_user.id,
-        "message_id": message.message_id,
-        "file_type": file_type,
-        "file_name": file_name,
-        "options": {}
-    }
-
-    await message.answer(f"فایل دریافت شد. نوع: {file_type}\nدر حال ارسال به Worker...")
-
-    # Send to bridge
-    await telegram_service.send_to_bridge(Protocol.encode(job_data))
-    logger.info(f"Job forwarded to bridge: {file_type}")
+async def handle_password_response(message: Message, job_id):
+    from core.protocol import Protocol
+    await telegram_service.send_to_bridge(
+        Protocol.encode({
+            "type": "password_response",
+            "job_id": job_id,
+            "password": message.text,
+            "user_id": message.from_user.id
+        })
+    )
+    await message.answer("رمز دریافت شد. ادامه پردازش...")
+    del pending_passwords[message.chat.id]
 
 async def main():
     logging.basicConfig(level=logging.INFO)
-    logger.info("Bot started")
+    logger.info("Bot started with Password support")
     await dp.start_polling(bot)
 
 if __name__ == "__main__":

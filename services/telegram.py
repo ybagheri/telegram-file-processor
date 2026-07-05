@@ -18,22 +18,18 @@ class TelegramService:
         self.bridge_group_id = Config.GROUP_ID
 
     async def send_to_bridge(self, text: str):
-        """Send message to bridge group"""
         try:
             await self.bot.send_message(self.bridge_group_id, text)
-            logger.info("Message sent to bridge")
         except Exception as e:
-            logger.error(f"Failed to send to bridge: {e}")
+            logger.error(f"Bridge send failed: {e}")
 
     async def send_result_to_user(self, user_id: int, text: str):
-        """Send result back to user"""
         try:
             await self.bot.send_message(user_id, text)
         except Exception as e:
-            logger.error(f"Failed to send to user: {e}")
+            logger.error(f"User send failed: {e}")
 
     async def download_file(self, message, file_path: str):
-        """Download file from Telegram"""
         try:
             return await message.download_media(file=file_path)
         except Exception as e:
