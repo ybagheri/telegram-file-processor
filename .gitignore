@@ -1,0 +1,68 @@
+# ====================
+# Environment & Secrets
+# ====================
+.env
+*.session
+*.session-journal
+
+# ====================
+# Python
+# ====================
+__pycache__/
+*.py[cod]
+*.pyo
+*.egg-info/
+dist/
+build/
+*.egg
+*.whl
+venv/
+env/
+.venv/
+virtualenv/
+
+# ====================
+# Project Data
+# ====================
+downloads/
+outputs/
+logs/
+sessions/
+temp/
+logo/
+*.log
+
+# ====================
+# Debug & Test Files
+# ====================
+bot_debug.py
+check_ids.py
+check_membership.py
+find_group.py
+get_group_id.py
+login.py
+test_*.py
+
+# ====================
+# IDE & Editor
+# ====================
+.vscode/
+.idea/
+*.swp
+*.swo
+*~
+
+# ====================
+# OS Files
+# ====================
+.DS_Store
+Thumbs.db
+.directory
+
+# ====================
+# Misc
+# ====================
+*.pyc
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
