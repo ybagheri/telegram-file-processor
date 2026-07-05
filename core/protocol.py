@@ -1,6 +1,6 @@
 import json
 from typing import Dict, Any
-from .constants import MessageType, PROJECT_IDENTIFIER
+from .constants import PROJECT_IDENTIFIER
 
 class Protocol:
     @staticmethod
