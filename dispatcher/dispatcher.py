@@ -17,9 +17,15 @@ class Dispatcher:
 
     async def dispatch(self, job):
         """Dispatch job to appropriate processor"""
-        processor = self.processors.get(job.file_type)
+        processor = self.processors.get(job.file_type.upper())
         if processor:
-            logger.info(f"Dispatching {job.file_type} job {job.job_id}")
-            await processor.process(job)
+            logger.info(f"Dispatching {job.file_type} job {job.job_id} to processor")
+            try:
+                await processor.process(job)
+                job.status = "completed"
+            except Exception as e:
+                logger.error(f"Processor failed for {job.job_id}: {e}")
+                job.status = "failed"
         else:
-            logger.error(f"No processor for type {job.file_type}")
+            logger.error(f"No processor found for type: {job.file_type}")
+            job.status = "failed"
