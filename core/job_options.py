@@ -1,0 +1,55 @@
+from __future__ import annotations
+
+from dataclasses import dataclass, field
+
+
+@dataclass(slots=True)
+class JobOptions:
+
+    # ==========================================
+    # Processing
+    # ==========================================
+
+    quality: str = "360"
+
+    password: str | None = None
+
+    # ==========================================
+    # Metadata
+    # ==========================================
+
+    title: str = ""
+
+    artist: str = ""
+
+    album: str = ""
+
+    comment: str = ""
+
+    copyright: str = ""
+
+    # ==========================================
+    # Processing Options
+    # ==========================================
+
+    watermark: bool = True
+
+    thumbnail_second: int = 3
+
+    # ==========================================
+    # Rename
+    # ==========================================
+
+    remove_words: list[str] = field(
+        default_factory=list
+    )
+
+    rename_to: str = ""
+
+    # ==========================================
+    # Future
+    # ==========================================
+
+    extra: dict = field(
+        default_factory=dict
+    )

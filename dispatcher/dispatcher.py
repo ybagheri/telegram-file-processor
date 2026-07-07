@@ -1,4 +1,5 @@
 from core.logger import get_logger
+
 from processors.video import VideoProcessor
 from processors.audio import AudioProcessor
 from processors.pdf import PDFProcessor
@@ -6,9 +7,12 @@ from processors.archive import ArchiveProcessor
 
 logger = get_logger(__name__)
 
+
 class Dispatcher:
+
     def __init__(self):
-        self.processors = {
+
+        self._processors = {
             "VIDEO": VideoProcessor(),
             "AUDIO": AudioProcessor(),
             "PDF": PDFProcessor(),
@@ -16,16 +20,47 @@ class Dispatcher:
         }
 
     async def dispatch(self, job):
-        """Dispatch job to appropriate processor"""
-        processor = self.processors.get(job.file_type.upper())
-        if processor:
-            logger.info(f"Dispatching {job.file_type} job {job.job_id} to processor")
-            try:
-                await processor.process(job)
-                job.status = "completed"
-            except Exception as e:
-                logger.error(f"Processor failed for {job.job_id}: {e}")
-                job.status = "failed"
-        else:
-            logger.error(f"No processor found for type: {job.file_type}")
-            job.status = "failed"
+
+        file_type = (job.file_type or "").upper()
+
+        processor = self._processors.get(file_type)
+
+        if processor is None:
+            logger.error(
+                "Unsupported file type: %s",
+                file_type,
+            )
+            job.status = "FAILED"
+            return False
+
+        logger.info(
+            "Job %s -> %s",
+            job.job_id,
+            processor.__class__.__name__,
+        )
+
+        job.status = "PROCESSING"
+
+        try:
+
+            await processor.process(job)
+
+            job.status = "COMPLETED"
+
+            logger.info(
+                "Job %s completed",
+                job.job_id,
+            )
+
+            return True
+
+        except Exception:
+
+            logger.exception(
+                "Processor failed for job %s",
+                job.job_id,
+            )
+
+            job.status = "FAILED"
+
+            return False

@@ -1,74 +1,143 @@
 import asyncio
-from telethon import events
-from config import Config
-from services.telegram import TelegramService
-from core.protocol import Protocol
-from core.job import Job
-from dispatcher.dispatcher import Dispatcher
-from utils.filetype import FileTypeDetector
-from utils.files import create_job_folders, cleanup_job
-from core.logger import get_logger
 from pathlib import Path
+
+from telethon import events
+
+from config import Config
+from core.job import Job
+from core.logger import get_logger
+from core.protocol import Protocol
+from dispatcher.dispatcher import Dispatcher
+from services.telegram import TelegramService
+from utils.filetype import FileTypeDetector
 
 logger = get_logger(__name__)
 
-telegram_service = TelegramService()
+telegram = TelegramService()
 dispatcher = Dispatcher()
 
+
+async def process_job(event, payload: dict):
+
+    if not event.message.media:
+        logger.warning("Job message has no media")
+        return
+
+    job = Job(
+        user_id=payload["user_id"],
+        message_id=event.message.id,
+        options=payload.get("options", {}),
+    )
+
+    job.create_folders()
+
+    filename = "input"
+
+    mime_type = ""
+
+    if event.message.file:
+
+        filename = event.message.file.name or filename
+        mime_type = event.message.file.mime_type or ""
+        job.file_size = event.message.file.size or 0
+
+    job.file_name = filename
+    job.mime_type = mime_type
+
+    job.file_type = FileTypeDetector.detect(
+        mime_type,
+        filename,
+    )
+
+    input_path = job.input_dir / filename
+
+    job.input_file = await telegram.download(
+        event.message,
+        input_path,
+    )
+
+    if job.input_file is None:
+
+        await telegram.send_error(
+            Protocol.create_error(
+                user_id=job.user_id,
+                job_id=job.job_id,
+                message="Download failed",
+            )
+        )
+
+        return
+
+    success = await dispatcher.dispatch(job)
+
+    if success:
+
+        await telegram.send_result(
+            Protocol.create_result(
+                user_id=job.user_id,
+                job_id=job.job_id,
+                files=[
+                    p.name
+                    for p in job.output_files
+                ],
+            )
+        )
+
+        for output in job.output_files:
+
+            await telegram.upload_file(
+                output,
+                Protocol.create_result(
+                    user_id=job.user_id,
+                    job_id=job.job_id,
+                    files=[output.name],
+                ),
+            )
+
+    else:
+
+        await telegram.send_error(
+            Protocol.create_error(
+                user_id=job.user_id,
+                job_id=job.job_id,
+                message="Processing failed",
+            )
+        )
+
+    job.cleanup()
+
+
 async def main():
-    await telegram_service.client.start()
+
+    await telegram.start()
+
     logger.info("Worker started")
 
-    @telegram_service.client.on(events.NewMessage(chats=Config.GROUP_ID))
-    async def handle_bridge_message(event):
+    @telegram.client.on(events.NewMessage(chats=Config.GROUP_ID))
+    async def bridge_handler(event):
+
+        if not event.message.message:
+            return
+
         try:
-            if not event.message.message:
-                return
-            data = Protocol.decode(event.message.message)
 
-            if data.get("type") == "job":
-                await process_job(data, event)
-        except Exception as e:
-            logger.error(f"Worker error: {e}")
+            payload = Protocol.decode(
+                event.message.message,
+            )
 
-    await telegram_service.client.run_until_disconnected()
+        except Exception:
+            return
 
-async def process_job(data, event):
-    """Create Job, download file, dispatch"""
-    job = Job(
-        user_id=data["user_id"],
-        message_id=data["message_id"],
-        file_type=data["file_type"]
-    )
+        if payload.get("type") != "JOB":
+            return
 
-    job_dir = create_job_folders(job, Config.PATHS["downloads"])
-    input_path = job.folders["input"] / data.get("file_name", "input_file")
+        await process_job(
+            event,
+            payload,
+        )
 
-    logger.info(f"Downloading file for job {job.job_id}")
-    
-    # Download the file (we need the original message - simplified for now)
-    # In real scenario we forward message_id or use file_id
-    # For now placeholder:
-    # file = await telegram_service.download_file(original_message, str(input_path))
-    
-    job.input_file = input_path
-    job.status = "downloading"
+    await telegram.client.run_until_disconnected()
 
-    logger.info(f"Job {job.job_id} ready. Dispatching...")
-    await dispatcher.dispatch(job)
-
-    # Cleanup
-    cleanup_job(job_dir.parent)
-
-    # Send result back
-    await telegram_service.send_to_bridge(
-        Protocol.encode({
-            "type": "result",
-            "job_id": job.job_id,
-            "status": job.status,
-            "user_id": job.user_id
-        })
-    )
 
 if __name__ == "__main__":
     asyncio.run(main())
