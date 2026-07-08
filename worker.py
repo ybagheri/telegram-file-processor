@@ -1,433 +1,171 @@
-from __future__ import annotations
-
 import asyncio
-from pathlib import Path
 
 from telethon import events
 
-from config import Config
-
-from core.constants import (
-    MessageType,
-    JobStatus,
-)
-
+from config import Telegram
+from core.constants import MessageType
 from core.job import Job
 from core.job_options import JobOptions
 from core.logger import get_logger
+from core.password_broker import password_broker
 from core.protocol import Protocol
-
 from dispatcher.dispatcher import Dispatcher
-
-from services.telegram import TelegramService
+from services.telegram import telegram_service
+from utils.filetype import FileTypeDetector
 
 logger = get_logger(__name__)
-
-telegram = TelegramService()
 
 dispatcher = Dispatcher()
 
 
-# =====================================================
-# Part 1
-# Initialization
-# =====================================================
+def _build_options(raw: dict) -> JobOptions:
+    allowed = JobOptions.__dataclass_fields__.keys()
+    filtered = {k: v for k, v in (raw or {}).items() if k in allowed}
+    return JobOptions(**filtered)
 
 
-async def startup():
+async def process_job(payload: dict):
 
-    logger.info(
-        "Worker starting...",
+    message_id = payload.get("message_id")
+
+    # The bridge message that carries the JSON payload is a *separate*
+    # text message from the one that carries the actual file (which was
+    # forwarded/copied into the group by bot.py). We fetch the real
+    # media message by its id instead of relying on whatever message
+    # happened to trigger this handler.
+    message = await telegram_service.client.get_messages(
+        Telegram.GROUP_ID,
+        ids=message_id,
     )
 
-    await telegram.start()
-
-    logger.info(
-        "Worker connected.",
-    )
-
-
-async def shutdown():
-
-    logger.info(
-        "Worker stopping...",
-    )
-
-    await telegram.stop()
-
-    logger.info(
-        "Worker disconnected.",
-    )
-	
-# =====================================================
-# Part 2
-# Build Job
-# =====================================================
-
-async def build_job(
-    event,
-    payload: dict,
-) -> Job:
-
-    message = event.message
-
-    options = JobOptions(
-        quality=payload.get("options", {}).get(
-            "quality",
-            "",
-        ),
-        title=payload.get("options", {}).get(
-            "title",
-            "",
-        ),
-        artist=payload.get("options", {}).get(
-            "artist",
-            "",
-        ),
-        password=payload.get("options", {}).get(
-            "password",
-            "",
-        ),
-    )
+    if message is None or not message.media:
+        logger.warning("Job message %s has no media", message_id)
+        return
 
     job = Job(
         user_id=payload["user_id"],
-        message_id=payload["message_id"],
-        original_name=payload["original_name"],
-        mime_type=payload["mime_type"],
-        file_type=payload["file_type"],
-        file_size=payload["file_size"],
-        options=options,
+        message_id=message_id,
+        options=_build_options(payload.get("options", {})),
     )
 
-    file_name = (
-        job.original_name
-        or f"{job.job_id}.bin"
+    filename = "input"
+    mime_type = ""
+
+    if message.file:
+        filename = message.file.name or filename
+        mime_type = message.file.mime_type or ""
+        job.file_size = message.file.size or 0
+
+    job.original_name = filename
+    job.mime_type = mime_type
+
+    job.file_type = FileTypeDetector.detect(
+        mime_type,
+        filename,
     )
 
-    input_file = job.input_dir / file_name
+    input_path = job.input_dir / filename
 
-    await telegram.download(
+    job.input_file = await telegram_service.download(
         message,
-        input_file,
+        input_path,
     )
 
-    job.input_file = input_file
+    if job.input_file is None:
 
-    logger.info(
-        "Job %s created",
-        job.job_id,
-    )
-
-    return job
-	
-# =====================================================
-# Part 3
-# Send Results
-# =====================================================
-
-async def send_results(
-    job: Job,
-):
-
-    total = len(
-        job.output_files,
-    )
-
-    if total == 0:
-
-        logger.warning(
-            "Job %s has no output.",
-            job.job_id,
+        await telegram_service.send_error(
+            Protocol.create_error(
+                user_id=job.user_id,
+                job_id=job.job_id,
+                message="Download failed",
+            )
         )
 
+        job.cleanup()
         return
 
-    for index, output in enumerate(
-
-        job.output_files,
-
-        start=1,
-
-    ):
-
-        caption = Protocol.create_result(
-
-            user_id=job.user_id,
-
-            job_id=job.job_id,
-
-            file_index=index,
-
-            file_count=total,
-
-            caption=job.result_caption,
-
-            delete_after_send=True,
-
-            silent=False,
-
-        )
-
-        await telegram.upload_file(
-
-            path=output,
-
-            caption=caption,
-
-        )
-
-        logger.info(
-
-            "Output %s/%s sent (%s)",
-
-            index,
-
-            total,
-
-            output.name,
-
-        )
-# =====================================================
-# Part 4
-# Password Request
-# =====================================================
-
-async def request_password(
-    job: Job,
-    filename: str,
-) -> bool:
-
-    payload = Protocol.create_password_request(
-
-        user_id=job.user_id,
-
-        job_id=job.job_id,
-
-        filename=filename,
-
-    )
-
-    await telegram.send_password_request(
-        payload,
-    )
-
-    logger.info(
-        "Password requested (%s)",
-        job.job_id,
-    )
-
-    return True
-
-
-# =====================================================
-# Password Response
-# =====================================================
-
-_password_waiters: dict[str, asyncio.Future] = {}
-
-
-async def wait_for_password(
-    job_id: str,
-    timeout: int = 300,
-) -> str | None:
-
-    loop = asyncio.get_running_loop()
-
-    future = loop.create_future()
-
-    _password_waiters[job_id] = future
+    success = False
 
     try:
+        success = await dispatcher.dispatch(job)
+    except Exception as e:
+        logger.exception("Unhandled error while dispatching job %s", job.job_id)
+        success = False
+        error_message = str(e) or "Processing failed"
+    else:
+        error_message = "Processing failed"
 
-        return await asyncio.wait_for(
-            future,
-            timeout=timeout,
+    if job.has_output:
+
+        await telegram_service.send_result(
+            Protocol.create_result(
+                user_id=job.user_id,
+                job_id=job.job_id,
+                files=[p.name for p in job.output_files],
+            )
         )
 
-    except asyncio.TimeoutError:
+        for output in job.output_files:
 
-        logger.warning(
-            "Password timeout (%s)",
-            job_id,
+            await telegram_service.upload_file(
+                output,
+                Protocol.create_result(
+                    user_id=job.user_id,
+                    job_id=job.job_id,
+                    files=[output.name],
+                ),
+            )
+
+    if not success or not job.has_output:
+
+        await telegram_service.send_error(
+            Protocol.create_error(
+                user_id=job.user_id,
+                job_id=job.job_id,
+                message=error_message if not job.has_output else "Some files failed to process",
+            )
         )
 
-        return None
-
-    finally:
-
-        _password_waiters.pop(
-            job_id,
-            None,
-        )
+    job.cleanup()
 
 
-async def handle_password_response(
-    payload: dict,
-):
-
-    job_id = payload["job_id"]
-
-    future = _password_waiters.get(
-        job_id,
-    )
-
-    if future is None:
-
-        return
-
-    if future.done():
-
-        return
-
-    future.set_result(
-        payload["password"],
-    )
-	
-# =====================================================
-# Part 5
-# Bridge Handler
-# =====================================================
-
-@telegram.client.on(
-    events.NewMessage(
-        chats=Config.GROUP_ID,
-    )
-)
-async def handle_bridge(
-    event,
-):
-
-    message = event.message
-
-    payload = None
-
+async def _process_job_safe(payload: dict):
     try:
-
-        if message.caption:
-
-            payload = Protocol.decode(
-                message.caption,
-            )
-
-        elif message.message:
-
-            payload = Protocol.decode(
-                message.message,
-            )
-
-        else:
-
-            return
-
+        await process_job(payload)
     except Exception:
+        logger.exception("Unhandled error processing job payload: %s", payload)
 
-        return
-
-    msg_type = payload.get(
-        "type",
-    )
-
-    # -------------------------------------------------
-    # Password Response
-    # -------------------------------------------------
-
-    if msg_type == MessageType.PASSWORD_RESPONSE:
-
-        await handle_password_response(
-            payload,
-        )
-
-        return
-
-    # -------------------------------------------------
-    # Job
-    # -------------------------------------------------
-
-    if msg_type != MessageType.JOB:
-
-        return
-
-    logger.info(
-        "Job received (%s)",
-        payload["user_id"],
-    )
-
-    job = None
-
-    try:
-
-        job = await build_job(
-            event,
-            payload,
-        )
-
-        ok = await dispatcher.dispatch(
-            job,
-        )
-
-        if not ok:
-
-            logger.error(
-                "Job failed (%s)",
-                job.job_id,
-            )
-
-            return
-
-        await send_results(
-            job,
-        )
-
-        logger.info(
-            "Job completed (%s)",
-            job.job_id,
-        )
-
-    except Exception:
-
-        logger.exception(
-            "Worker error",
-        )
-
-    finally:
-
-        if job:
-
-            job.cleanup()
-			
-# =====================================================
-# Part 6
-# Main
-# =====================================================
 
 async def main():
 
-    await startup()
+    await telegram_service.start()
 
-    logger.info(
-        "Worker is running..."
-    )
+    logger.info("Worker started")
 
-    try:
+    @telegram_service.client.on(events.NewMessage(chats=Telegram.GROUP_ID))
+    async def bridge_handler(event):
 
-        await telegram.client.run_until_disconnected()
+        if not event.message.message:
+            return
 
-    finally:
+        try:
+            payload = Protocol.decode(event.message.message)
+        except Exception:
+            return
 
-        await shutdown()
+        message_type = payload.get("type")
+
+        if message_type == MessageType.JOB.value:
+            asyncio.create_task(_process_job_safe(payload))
+
+        elif message_type == MessageType.PASSWORD_RESPONSE.value:
+            password_broker.resolve(
+                payload.get("job_id"),
+                payload.get("password", ""),
+            )
+
+    await telegram_service.client.run_until_disconnected()
 
 
 if __name__ == "__main__":
-
-    try:
-
-        asyncio.run(
-            main(),
-        )
-
-    except KeyboardInterrupt:
-
-        logger.info(
-            "Worker stopped."
-        )
+    asyncio.run(main())

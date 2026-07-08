@@ -27,11 +27,15 @@ class Job:
     # Job
     # =====================================================
 
-    job_id: str = field(default_factory=lambda: uuid4().hex[:12])
+    job_id: str = field(
+        default_factory=lambda: uuid4().hex[:12]
+    )
 
     status: str = JobStatus.PENDING
 
-    created_at: datetime = field(default_factory=datetime.utcnow)
+    created_at: datetime = field(
+        default_factory=datetime.utcnow
+    )
 
     # =====================================================
     # Original File
@@ -51,7 +55,9 @@ class Job:
     # User Options
     # =====================================================
 
-    options: JobOptions = field(default_factory=JobOptions)
+    options: JobOptions = field(
+        default_factory=JobOptions
+    )
 
     # =====================================================
     # Media Information
@@ -69,9 +75,13 @@ class Job:
     # Results
     # =====================================================
 
-    extracted_files: list[Path] = field(default_factory=list)
+    extracted_files: list[Path] = field(
+        default_factory=list
+    )
 
-    output_files: list[Path] = field(default_factory=list)
+    output_files: list[Path] = field(
+        default_factory=list
+    )
 
     thumbnail: Path | None = None
 
@@ -160,12 +170,19 @@ class Job:
     # =====================================================
 
     def update_media_info(
+
         self,
+
         *,
+
         duration: int = 0,
+
         width: int = 0,
+
         height: int = 0,
+
         bitrate: int = 0,
+
     ):
 
         self.duration = duration
@@ -255,29 +272,3 @@ class Job:
                 self.root,
                 ignore_errors=True,
             )
-
-    @property
-    def input_filename(self) -> str:
-
-        if self.input_file:
-
-            return self.input_file.name
-
-        return self.original_name
-
-    @property
-    def extension(self) -> str:
-
-        return Path(
-            self.original_name,
-        ).suffix.lower()
-
-    def clear_outputs(self):
-
-        self.output_files.clear()
-
-        self.extracted_files.clear()
-
-        self.thumbnail = None
-
-        self.cover = None

@@ -7,3 +7,4 @@ Pillow
 pymupdf
 rarfile
 py7zr
+mutagen

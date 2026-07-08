@@ -41,32 +41,13 @@ class Protocol:
     def create_job(
         *,
         user_id: int,
-        message_id: int,
-        file_type: str,
-        original_name: str,
-        mime_type: str,
-        file_size: int,
         options: dict | None = None,
     ) -> dict:
 
         return {
-
             "type": MessageType.JOB,
-
             "user_id": user_id,
-
-            "message_id": message_id,
-
-            "file_type": file_type,
-
-            "original_name": original_name,
-
-            "mime_type": mime_type,
-
-            "file_size": file_size,
-
             "options": options or {},
-
         }
 
     @staticmethod
@@ -74,24 +55,16 @@ class Protocol:
         *,
         user_id: int,
         job_id: str,
-        file_index: int = 1,
-        file_count: int = 1,
-        caption: str = "",
-        delete_after_send: bool = True,
-        silent: bool = False,
+        files: list | None = None,
     ) -> dict:
 
         return {
             "type": MessageType.RESULT,
             "user_id": user_id,
             "job_id": job_id,
-            "file_index": file_index,
-            "file_count": file_count,
-            "caption": caption,
-            "delete_after_send": delete_after_send,
-            "silent": silent,
+            "files": files or [],
         }
-    
+
     @staticmethod
     def create_password_request(
         *,
@@ -131,19 +104,12 @@ class Protocol:
     ) -> dict:
 
         return {
-
             "type": MessageType.ERROR,
-
             "user_id": user_id,
-
             "job_id": job_id,
-
-            "level": "error",
-
             "message": message,
-
         }
-        
+
     @staticmethod
     def create_info(
         *,
@@ -153,15 +119,8 @@ class Protocol:
     ) -> dict:
 
         return {
-
             "type": MessageType.INFO,
-
             "user_id": user_id,
-
             "job_id": job_id,
-
-            "level": "info",
-
             "message": message,
-
         }

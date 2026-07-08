@@ -1,429 +1,229 @@
 from __future__ import annotations
 
-import shutil
+import asyncio
 import zipfile
-from pathlib import Path
 
-import py7zr
-import rarfile
-
+from core.constants import JobStatus
 from core.logger import get_logger
+from core.password_broker import password_broker
+from core.protocol import Protocol
+
+from services.telegram import telegram_service
 
 logger = get_logger(__name__)
 
+PASSWORD_TIMEOUT_SECONDS = 300
 
-class ArchiveService:
 
-    # =====================================================
-    # Public
-    # =====================================================
+class _PasswordRequired(Exception):
+    pass
 
-    async def extract(
-        self,
-        archive_file: Path,
-        output_dir: Path,
-        password: str | None = None,
-    ) -> bool:
 
-        suffix = archive_file.suffix.lower()
+class _WrongPassword(Exception):
+    pass
 
-        try:
 
-            if suffix == ".zip":
+class ArchiveProcessor:
 
-                return self._extract_zip(
-                    archive_file,
-                    output_dir,
-                    password,
-                )
+    async def process(self, job):
 
-            if suffix == ".rar":
+        logger.info(f"Archive processing started ({job.job_id})")
 
-                return self._extract_rar(
-                    archive_file,
-                    output_dir,
-                    password,
-                )
+        if job.input_file is None:
+            raise ValueError("Input file not found")
 
-            if suffix == ".7z":
+        job.set_status(JobStatus.PROCESSING)
 
-                return self._extract_7z(
-                    archive_file,
-                    output_dir,
-                    password,
-                )
+        suffix = job.input_file.suffix.lower()
+        password = job.options.password or None
 
-            logger.error(
-                "Unsupported archive: %s",
-                suffix,
-            )
+        loop = asyncio.get_event_loop()
 
-            return False
-
-        except Exception as e:
-
-            logger.exception(e)
-
-            return False
-
-    # =====================================================
-    # ZIP
-    # =====================================================
-
-    def _extract_zip(
-        self,
-        archive: Path,
-        output: Path,
-        password: str | None,
-    ) -> bool:
-
-        with zipfile.ZipFile(archive) as z:
-
-            if password:
-
-                z.extractall(
-                    output,
-                    pwd=password.encode(),
-                )
-
-            else:
-
-                z.extractall(
-                    output,
-                )
-
-        return True
-
-    # =====================================================
-    # RAR
-    # =====================================================
-
-    def _extract_rar(
-        self,
-        archive: Path,
-        output: Path,
-        password: str | None,
-    ) -> bool:
-
-        with rarfile.RarFile(archive) as r:
-
-            if password:
-
-                r.extractall(
-                    output,
-                    pwd=password,
-                )
-
-            else:
-
-                r.extractall(
-                    output,
-                )
-
-        return True
-
-    # =====================================================
-    # 7Z
-    # =====================================================
-
-    def _extract_7z(
-        self,
-        archive: Path,
-        output: Path,
-        password: str | None,
-    ) -> bool:
-
-        with py7zr.SevenZipFile(
-
-            archive,
-
-            mode="r",
-
-            password=password,
-
-        ) as z:
-
-            z.extractall(
-                path=output,
-            )
-
-        return True
-        
-        
-        # =====================================================
-    # List Extracted Files
-    # =====================================================
-
-    def list_files(
-        self,
-        directory: Path,
-    ) -> list[Path]:
-
-        files: list[Path] = []
-
-        for file in directory.rglob("*"):
-
-            if file.is_file():
-
-                files.append(file)
-
-        files.sort()
-
-        return files
-
-    # =====================================================
-    # Find First Archive
-    # =====================================================
-
-    def find_first_archive(
-        self,
-        directory: Path,
-    ) -> Path | None:
-
-        for file in sorted(directory.iterdir()):
-
-            if not file.is_file():
-
-                continue
-
-            if self.is_archive(file):
-
-                return file
-
-        return None
-
-    # =====================================================
-    # Archive Check
-    # =====================================================
-
-    def is_archive(
-        self,
-        file: Path,
-    ) -> bool:
-
-        return file.suffix.lower() in {
-
-            ".zip",
-
-            ".rar",
-
-            ".7z",
-
-        }
-
-    # =====================================================
-    # Multipart Archive
-    # =====================================================
-
-    def is_multipart(
-        self,
-        file: Path,
-    ) -> bool:
-
-        name = file.name.lower()
-
-        if ".part1.rar" in name:
-
-            return True
-
-        if ".part01.rar" in name:
-
-            return True
-
-        return False
-
-    def find_main_archive(
-        self,
-        directory: Path,
-    ) -> Path | None:
-
-        for file in sorted(directory.iterdir()):
-
-            if not file.is_file():
-
-                continue
-
-            if self.is_multipart(file):
-
-                return file
-
-        return self.find_first_archive(
-            directory,
-        )
-
-    # =====================================================
-    # Cleanup
-    # =====================================================
-
-    def cleanup(
-        self,
-        directory: Path,
-    ):
-
-        if not directory.exists():
-
-            return
-
-        shutil.rmtree(
-            directory,
-            ignore_errors=True,
-        )
-
-
-archive_service = ArchiveService()
-
-
-    # =====================================================
-    # Recursive Extraction
-    # =====================================================
-
-    async def extract_recursive(
-        self,
-        archive_file: Path,
-        output_dir: Path,
-        password: str | None = None,
-        max_depth: int = 3,
-    ) -> bool:
-
-        ok = await self.extract(
-            archive_file,
-            output_dir,
-            password,
-        )
-
-        if not ok:
-            return False
-
-        current_depth = 0
-
-        while current_depth < max_depth:
-
-            nested = self.find_first_archive(
-                output_dir,
-            )
-
-            if nested is None:
-                break
-
-            logger.info(
-                "Nested archive found: %s",
-                nested.name,
-            )
-
-            nested_output = nested.parent / nested.stem
-
-            nested_output.mkdir(
-                parents=True,
-                exist_ok=True,
-            )
-
-            ok = await self.extract(
-                nested,
-                nested_output,
-                password,
-            )
-
-            if not ok:
-                logger.warning(
-                    "Cannot extract nested archive: %s",
-                    nested.name,
-                )
-                break
+        # Try to extract; if a password is required (or the given one is
+        # wrong), ask the user through the bridge and retry once.
+        for attempt in range(2):
 
             try:
-                nested.unlink()
-            except Exception:
-                pass
+                await loop.run_in_executor(
+                    None,
+                    self._extract,
+                    job.input_file,
+                    job.extracted_dir,
+                    suffix,
+                    password,
+                )
+                break
 
-            current_depth += 1
+            except (_PasswordRequired, _WrongPassword):
 
-        return True
+                if attempt == 1:
+                    job.set_status(JobStatus.FAILED)
+                    raise ValueError("Correct password was not provided")
 
-    # =====================================================
-    # Utilities
-    # =====================================================
+                password = await self._request_password(job)
 
-    def count_files(
-        self,
-        directory: Path,
-    ) -> int:
-
-        return len(
-            self.list_files(
-                directory,
-            )
+        extracted_files = sorted(
+            p for p in job.extracted_dir.rglob("*") if p.is_file()
         )
 
-    def total_size(
-        self,
-        directory: Path,
-    ) -> int:
+        if not extracted_files:
+            job.set_status(JobStatus.FAILED)
+            raise ValueError("Archive contained no files")
 
-        total = 0
+        await self._process_extracted(job, extracted_files)
 
-        for file in directory.rglob("*"):
+        if job.has_output:
+            job.set_status(JobStatus.COMPLETED)
+        else:
+            job.set_status(JobStatus.FAILED)
 
-            if file.is_file():
+        logger.info(f"Archive processing finished ({job.job_id})")
 
-                total += file.stat().st_size
+        return job.has_output
 
-        return total
+    # =====================================================
+    # Password flow
+    # =====================================================
 
-    def remove_empty_dirs(
-        self,
-        directory: Path,
-    ):
+    async def _request_password(self, job) -> str:
 
-        for path in sorted(
-            directory.rglob("*"),
-            reverse=True,
-        ):
+        request = Protocol.create_password_request(
+            user_id=job.user_id,
+            job_id=job.job_id,
+            filename=job.original_name,
+        )
 
-            if path.is_dir():
+        waiter = password_broker.create_waiter(job.job_id)
+
+        await telegram_service.send_password_request(request)
+
+        try:
+            return await asyncio.wait_for(waiter, timeout=PASSWORD_TIMEOUT_SECONDS)
+        except asyncio.TimeoutError:
+            password_broker.cancel(job.job_id)
+            raise ValueError("Timed out waiting for the archive password")
+
+    # =====================================================
+    # Extraction (blocking, runs in a thread pool executor)
+    # =====================================================
+
+    def _extract(self, input_file, destination, suffix, password):
+
+        destination.mkdir(parents=True, exist_ok=True)
+
+        if suffix == ".zip":
+            self._extract_zip(input_file, destination, password)
+
+        elif suffix == ".rar":
+            self._extract_rar(input_file, destination, password)
+
+        elif suffix == ".7z":
+            self._extract_7z(input_file, destination, password)
+
+        else:
+            raise ValueError(f"Unsupported archive format: {suffix}")
+
+    def _extract_zip(self, input_file, destination, password):
+
+        with zipfile.ZipFile(input_file) as archive:
+
+            needs_password = any(
+                info.flag_bits & 0x1 for info in archive.infolist()
+            )
+
+            if needs_password and not password:
+                raise _PasswordRequired()
+
+            pwd_bytes = password.encode() if password else None
+
+            try:
+                archive.extractall(destination, pwd=pwd_bytes)
+            except RuntimeError as e:
+                if "password" in str(e).lower():
+                    raise _WrongPassword()
+                raise
+
+    def _extract_rar(self, input_file, destination, password):
+
+        import rarfile
+
+        with rarfile.RarFile(input_file) as archive:
+
+            if archive.needs_password() and not password:
+                raise _PasswordRequired()
+
+            try:
+                archive.extractall(destination, pwd=password)
+            except rarfile.RarWrongPassword:
+                raise _WrongPassword()
+            except rarfile.PasswordRequired:
+                raise _PasswordRequired()
+
+    def _extract_7z(self, input_file, destination, password):
+
+        import py7zr
+
+        try:
+            with py7zr.SevenZipFile(input_file, mode="r", password=password) as archive:
+
+                if archive.needs_password() and not password:
+                    raise _PasswordRequired()
+
+                archive.extractall(path=destination)
+
+        except (_PasswordRequired, _WrongPassword):
+            raise
+
+        except Exception as e:
+            message = str(e).lower()
+
+            if "password" in message or "crc" in message:
+                if password:
+                    raise _WrongPassword()
+                raise _PasswordRequired()
+
+            raise
+
+    # =====================================================
+    # Recursive processing of extracted files
+    # =====================================================
+
+    async def _process_extracted(self, job, extracted_files):
+
+        # Imported lazily to avoid a circular import
+        # (dispatcher imports this module at module load time).
+        from dispatcher.dispatcher import Dispatcher
+        from utils.filetype import FileTypeDetector
+
+        dispatcher = Dispatcher()
+
+        original_input = job.input_file
+        original_type = job.file_type
+        original_name = job.original_name
+
+        try:
+            for extracted in extracted_files:
+
+                file_type = FileTypeDetector.detect("", extracted.name)
+
+                job.input_file = extracted
+                job.original_name = extracted.name
+
+                if file_type == "UNKNOWN":
+                    job.add_output(extracted)
+                    continue
+
+                job.file_type = file_type
 
                 try:
+                    await dispatcher.dispatch(job)
+                except Exception:
+                    logger.exception(
+                        f"Failed to process extracted file "
+                        f"{extracted.name} ({job.job_id})"
+                    )
 
-                    path.rmdir()
-
-                except OSError:
-
-                    pass
-
-    def flatten_directory(
-        self,
-        directory: Path,
-    ):
-
-        files = self.list_files(
-            directory,
-        )
-
-        for file in files:
-
-            if file.parent == directory:
-
-                continue
-
-            destination = directory / file.name
-
-            counter = 1
-
-            while destination.exists():
-
-                destination = directory / (
-                    f"{file.stem}_{counter}{file.suffix}"
-                )
-
-                counter += 1
-
-            shutil.move(
-                str(file),
-                str(destination),
-            )
-
-        self.remove_empty_dirs(
-            directory,
-        )
-
-
-archive_service = ArchiveService()
+        finally:
+            job.input_file = original_input
+            job.file_type = original_type
+            job.original_name = original_name

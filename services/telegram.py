@@ -1,9 +1,11 @@
+from __future__ import annotations
+
 from pathlib import Path
 
 from aiogram import Bot
 from telethon import TelegramClient
 
-from config import Config
+from config import Telegram
 from core.logger import get_logger
 from core.protocol import Protocol
 
@@ -13,15 +15,15 @@ logger = get_logger(__name__)
 class TelegramService:
 
     def __init__(self):
-        self.bot = Bot(token=Config.BOT_TOKEN)
+        self.bot = Bot(token=Telegram.BOT_TOKEN)
 
         self.client = TelegramClient(
-            Config.SESSION_NAME,
-            Config.API_ID,
-            Config.API_HASH,
+            Telegram.SESSION_NAME,
+            Telegram.API_ID,
+            Telegram.API_HASH,
         )
 
-        self.bridge_group_id = Config.GROUP_ID
+        self.bridge_group_id = Telegram.GROUP_ID
 
     async def start(self):
         if not self.client.is_connected():
@@ -32,7 +34,7 @@ class TelegramService:
             await self.client.disconnect()
 
     # ------------------------------------------------------------------
-    # Bridge
+    # Bridge: bot -> worker (sent through the Bot API)
     # ------------------------------------------------------------------
 
     async def send_job(self, payload: dict):
@@ -40,6 +42,16 @@ class TelegramService:
             self.bridge_group_id,
             Protocol.encode(payload),
         )
+
+    async def send_password_response(self, payload: dict):
+        await self.bot.send_message(
+            self.bridge_group_id,
+            Protocol.encode(payload),
+        )
+
+    # ------------------------------------------------------------------
+    # Bridge: worker -> bot (sent through the userbot/MTProto client)
+    # ------------------------------------------------------------------
 
     async def send_result(self, payload: dict):
         await self.client.send_message(
@@ -65,69 +77,49 @@ class TelegramService:
             Protocol.encode(payload),
         )
 
-    async def send_password_response(self, payload: dict):
-        await self.bot.send_message(
-            self.bridge_group_id,
-            Protocol.encode(payload),
-        )
-
     # ------------------------------------------------------------------
     # Download
     # ------------------------------------------------------------------
 
-    async def download(self, message, destination: Path) -> Path:
+    async def download(self, message, destination: Path) -> Path | None:
 
         destination.parent.mkdir(
             parents=True,
             exist_ok=True,
         )
 
-        await message.download_media(
-            file=str(destination),
-        )
+        try:
+            result = await message.download_media(
+                file=str(destination),
+            )
+        except Exception:
+            logger.exception(f"Download failed: {destination}")
+            return None
+
+        if not result:
+            return None
 
         logger.info(f"Downloaded: {destination}")
 
         return destination
 
     # ------------------------------------------------------------------
-    # Upload
+    # Upload (worker -> bridge group, carries a Protocol caption)
     # ------------------------------------------------------------------
 
     async def upload_file(
         self,
         path: Path,
         caption: dict,
-        *,
-        thumb: Path | None = None,
-        voice: bool = False,
-        supports_streaming: bool = False,
     ):
-
-        kwargs = {
-            "caption": Protocol.encode(caption),
-        }
-
-        if thumb and thumb.exists():
-
-            kwargs["thumb"] = str(thumb)
-
-        if voice:
-
-            kwargs["voice"] = True
-
-        if supports_streaming:
-
-            kwargs["supports_streaming"] = True
-
         await self.client.send_file(
             self.bridge_group_id,
             str(path),
-            **kwargs,
+            caption=Protocol.encode(caption),
         )
 
     # ------------------------------------------------------------------
-    # User
+    # User (bot -> end user, via Bot API)
     # ------------------------------------------------------------------
 
     async def send_text(
@@ -155,79 +147,11 @@ class TelegramService:
             caption=caption,
         )
 
-    # ------------------------------------------------------------------
-    # Bridge Message
-    # ------------------------------------------------------------------
 
-    async def send_bridge_message(
-        self,
-        payload: dict,
-    ):
+# =====================================================
+# Singleton (shared by bot.py, worker.py and processors
+# so we don't spin up duplicate Bot/TelegramClient
+# instances for the same credentials).
+# =====================================================
 
-        await self.bot.send_message(
-            self.bridge_group_id,
-            Protocol.encode(
-                payload,
-            ),
-        )
-
-    # ------------------------------------------------------------------
-    # Copy User Media To Bridge
-    # ------------------------------------------------------------------
-
-    async def copy_user_message_to_bridge(
-        self,
-        *,
-        chat_id: int,
-        message_id: int,
-        caption: dict,
-    ):
-
-        await self.bot.copy_message(
-            chat_id=self.bridge_group_id,
-            from_chat_id=chat_id,
-            message_id=message_id,
-            caption=Protocol.encode(
-                caption,
-            ),
-        )
-
-    # ------------------------------------------------------------------
-    # Upload Output
-    # ------------------------------------------------------------------
-
-    async def upload_file(
-        self,
-        path: Path,
-        caption: dict,
-        *,
-        thumb: Path | None = None,
-        voice: bool = False,
-        supports_streaming: bool = False,
-    ):
-
-        kwargs = {
-            "caption": Protocol.encode(
-                caption,
-            ),
-        }
-
-        if thumb and thumb.exists():
-
-            kwargs["thumb"] = str(
-                thumb,
-            )
-
-        if voice:
-
-            kwargs["voice"] = True
-
-        if supports_streaming:
-
-            kwargs["supports_streaming"] = True
-
-        await self.client.send_file(
-            self.bridge_group_id,
-            str(path),
-            **kwargs,
-        )
+telegram_service = TelegramService()

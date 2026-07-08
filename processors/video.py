@@ -1,11 +1,9 @@
 from __future__ import annotations
 
-from pathlib import Path
-
 from config import (
     Metadata,
-    Paths,
     Processing,
+    Paths,
 )
 
 from core.constants import JobStatus
@@ -21,16 +19,11 @@ class VideoProcessor:
 
     async def process(self, job):
 
-        logger.info(
-            "Video job started (%s)",
-            job.job_id,
-        )
+        logger.info("Video job started (%s)", job.job_id)
 
-        job.set_status(
-            JobStatus.PROCESSING,
-        )
+        job.set_status(JobStatus.PROCESSING)
 
-        quality = job.options.quality.lower()
+        quality = (job.options.quality or "").lower()
 
         if quality == "mp3":
             return await self.extract_mp3(job)
@@ -44,22 +37,17 @@ class VideoProcessor:
         return await self.convert(job)
 
     # =====================================================
-    # Convert Video
+    # Convert (re-encode + watermark + thumbnail + tags)
     # =====================================================
 
-    async def convert(
-        self,
-        job,
-    ):
+    async def convert(self, job):
 
-        profile = self.get_profile(
+        profile = Processing.VIDEO_PROFILES.get(
             job.options.quality,
+            Processing.VIDEO_PROFILES[Processing.DEFAULT_VIDEO_QUALITY],
         )
 
-        output = self.build_output_name(
-            job,
-            ".mp4",
-        )
+        output = job.output_dir / (job.stem + ".mp4")
 
         ok = await media_service.convert_video(
             input_file=job.input_file,
@@ -68,78 +56,57 @@ class VideoProcessor:
             height=profile["height"],
             crf=profile["crf"],
             preset=profile["preset"],
-            logo=Paths.LOGO_FILE,
+            logo=Paths.LOGO_FILE if job.options.watermark else None,
         )
 
         if not ok:
-
-            job.set_status(
-                JobStatus.FAILED,
-            )
-
+            job.set_status(JobStatus.FAILED)
             return False
 
-        job.add_output(
-            output,
-        )
+        job.add_output(output)
 
-        thumb = self.build_thumbnail_name(
-            job,
-            output,
-        )
+        thumb = job.thumbs_dir / (output.stem + ".jpg")
 
-        ok = await media_service.generate_thumbnail(
+        thumb_ok = await media_service.generate_thumbnail(
             output,
             thumb,
-            Processing.THUMBNAIL_SECOND,
+            job.options.thumbnail_second or Processing.THUMBNAIL_SECOND,
         )
 
-        if ok:
+        if thumb_ok:
+            job.set_thumbnail(thumb)
 
-            job.set_thumbnail(
-                thumb,
-            )
+        info = media_service.get_video_info(output)
 
-        self.update_video_info(
-            job,
-            output,
+        job.update_media_info(
+            duration=info["duration"],
+            width=info["width"],
+            height=info["height"],
+            bitrate=info["bitrate"],
         )
 
-        tag_service.update_video(
+        title = job.options.title or tag_service.build_title(job.original_name)
+
+        tag_service.update_audio(
             output,
-            title=self.get_title(
-                job,
-            ),
-            artist=self.get_artist(
-                job,
-            ),
+            title=title,
+            artist=job.options.artist or Metadata.DEFAULT_ARTIST,
             cover=job.thumbnail,
         )
 
-        job.set_status(
-            JobStatus.COMPLETED,
-        )
+        job.set_status(JobStatus.COMPLETED)
 
-        logger.info(
-            "Video completed (%s)",
-            job.job_id,
-        )
+        logger.info("Video completed (%s)", job.job_id)
 
         return True
 
     # =====================================================
-    # Extract MP3
+    # MP3
     # =====================================================
 
-    async def extract_mp3(
-        self,
-        job,
-    ):
+    async def extract_mp3(self, job):
 
-        output = self.build_output_name(
-            job,
-            ".mp3",
-        )
+        output = job.output_dir / (job.stem + ".mp3")
 
         ok = await media_service.extract_mp3(
             job.input_file,
@@ -148,59 +115,40 @@ class VideoProcessor:
         )
 
         if not ok:
-
-            job.set_status(
-                JobStatus.FAILED,
-            )
-
+            job.set_status(JobStatus.FAILED)
             return False
 
-        job.add_output(
-            output,
+        job.add_output(output)
+
+        info = media_service.get_audio_info(output)
+
+        job.update_media_info(
+            duration=info["duration"],
+            bitrate=info["bitrate"],
         )
 
-        self.update_audio_info(
-            job,
-            output,
-        )
+        title = job.options.title or tag_service.build_title(job.original_name)
 
         tag_service.update_mp3(
             output,
-            title=self.get_title(
-                job,
-            ),
-            artist=self.get_artist(
-                job,
-            ),
-            album=job.options.album,
-            comment=job.options.comment,
+            title=title,
+            artist=job.options.artist or Metadata.DEFAULT_ARTIST,
             cover=job.thumbnail,
         )
 
-        job.set_status(
-            JobStatus.COMPLETED,
-        )
+        job.set_status(JobStatus.COMPLETED)
 
-        logger.info(
-            "MP3 completed (%s)",
-            job.job_id,
-        )
+        logger.info("MP3 completed (%s)", job.job_id)
 
         return True
 
     # =====================================================
-    # Extract M4A
+    # M4A
     # =====================================================
 
-    async def extract_m4a(
-        self,
-        job,
-    ):
+    async def extract_m4a(self, job):
 
-        output = self.build_output_name(
-            job,
-            ".m4a",
-        )
+        output = job.output_dir / (job.stem + ".m4a")
 
         ok = await media_service.extract_m4a(
             job.input_file,
@@ -209,58 +157,39 @@ class VideoProcessor:
         )
 
         if not ok:
-
-            job.set_status(
-                JobStatus.FAILED,
-            )
-
+            job.set_status(JobStatus.FAILED)
             return False
 
-        job.add_output(
-            output,
+        job.add_output(output)
+
+        info = media_service.get_audio_info(output)
+
+        job.update_media_info(
+            duration=info["duration"],
+            bitrate=info["bitrate"],
         )
 
-        self.update_audio_info(
-            job,
-            output,
-        )
+        title = job.options.title or tag_service.build_title(job.original_name)
 
         tag_service.update_m4a(
             output,
-            title=self.get_title(
-                job,
-            ),
-            artist=self.get_artist(
-                job,
-            ),
-            album=job.options.album,
-            comment=job.options.comment,
+            title=title,
+            artist=job.options.artist or Metadata.DEFAULT_ARTIST,
         )
 
-        job.set_status(
-            JobStatus.COMPLETED,
-        )
+        job.set_status(JobStatus.COMPLETED)
 
-        logger.info(
-            "M4A completed (%s)",
-            job.job_id,
-        )
+        logger.info("M4A completed (%s)", job.job_id)
 
         return True
 
     # =====================================================
-    # Extract Voice (OGG/Opus)
+    # Voice note (opus/ogg, mono, low bitrate)
     # =====================================================
 
-    async def extract_voice(
-        self,
-        job,
-    ):
+    async def extract_voice(self, job):
 
-        output = self.build_output_name(
-            job,
-            ".ogg",
-        )
+        output = job.output_dir / (job.stem + ".ogg")
 
         ok = await media_service.extract_voice(
             job.input_file,
@@ -268,239 +197,20 @@ class VideoProcessor:
         )
 
         if not ok:
-
-            job.set_status(
-                JobStatus.FAILED,
-            )
-
+            job.set_status(JobStatus.FAILED)
             return False
 
-        job.add_output(
-            output,
+        job.add_output(output)
+
+        info = media_service.get_audio_info(output)
+
+        job.update_media_info(
+            duration=info["duration"],
+            bitrate=info["bitrate"],
         )
 
-        self.update_audio_info(
-            job,
-            output,
-        )
+        job.set_status(JobStatus.COMPLETED)
 
-        tag_service.update_ogg(
-            output,
-            title=self.get_title(
-                job,
-            ),
-            artist=self.get_artist(
-                job,
-            ),
-        )
-
-        job.set_status(
-            JobStatus.COMPLETED,
-        )
-
-        logger.info(
-            "Voice completed (%s)",
-            job.job_id,
-        )
+        logger.info("Voice completed (%s)", job.job_id)
 
         return True
-
-    # =====================================================
-    # Helpers
-    # =====================================================
-
-    def get_profile(
-        self,
-        quality: str,
-    ) -> dict:
-
-        return Processing.VIDEO_PROFILES.get(
-            quality,
-            Processing.VIDEO_PROFILES[Processing.DEFAULT_VIDEO_QUALITY],
-        )
-
-    def build_output_name(
-        self,
-        job,
-        extension: str,
-    ) -> Path:
-
-        return job.output_dir / (f"{job.stem}{extension}")
-
-    def build_thumbnail_name(
-        self,
-        job,
-        output: Path,
-    ) -> Path:
-
-        return job.thumbs_dir / (f"{output.stem}.jpg")
-
-    # =====================================================
-    # Metadata Helpers
-    # =====================================================
-
-    def get_title(
-        self,
-        job,
-    ) -> str:
-
-        if job.options.title:
-
-            return job.options.title
-
-        return tag_service.build_title(
-            job.original_name,
-        )
-
-    def get_artist(
-        self,
-        job,
-    ) -> str:
-
-        if job.options.artist:
-
-            return job.options.artist
-
-        return Metadata.DEFAULT_ARTIST
-
-    # =====================================================
-    # Media Info
-    # =====================================================
-
-    def update_video_info(
-        self,
-        job,
-        output: Path,
-    ):
-
-        info = media_service.get_video_info(
-            output,
-        )
-
-        job.update_media_info(
-            duration=info.get(
-                "duration",
-                0,
-            ),
-            width=info.get(
-                "width",
-                0,
-            ),
-            height=info.get(
-                "height",
-                0,
-            ),
-            bitrate=info.get(
-                "bitrate",
-                0,
-            ),
-        )
-
-    def update_audio_info(
-        self,
-        job,
-        output: Path,
-    ):
-
-        info = media_service.get_audio_info(
-            output,
-        )
-
-        job.update_media_info(
-            duration=info.get(
-                "duration",
-                0,
-            ),
-            bitrate=info.get(
-                "bitrate",
-                0,
-            ),
-        )
-
-    # =====================================================
-    # Common Helpers
-    # =====================================================
-
-    def get_profile(
-        self,
-        quality: str,
-    ) -> dict:
-
-        return Processing.VIDEO_PROFILES.get(
-            quality,
-            Processing.VIDEO_PROFILES[Processing.DEFAULT_VIDEO_QUALITY],
-        )
-
-    def get_title(
-        self,
-        job,
-    ) -> str:
-
-        if job.options.title:
-
-            return job.options.title
-
-        return tag_service.build_title(
-            job.original_name,
-        )
-
-    def get_artist(
-        self,
-        job,
-    ) -> str:
-
-        if job.options.artist:
-
-            return job.options.artist
-
-        return Metadata.DEFAULT_ARTIST
-
-    def update_video_info(
-        self,
-        job,
-        output: Path,
-    ):
-
-        info = media_service.get_video_info(
-            output,
-        )
-
-        job.update_media_info(
-            duration=info.get(
-                "duration",
-                0,
-            ),
-            width=info.get(
-                "width",
-                0,
-            ),
-            height=info.get(
-                "height",
-                0,
-            ),
-            bitrate=info.get(
-                "bitrate",
-                0,
-            ),
-        )
-
-    def update_audio_info(
-        self,
-        job,
-        output: Path,
-    ):
-
-        info = media_service.get_audio_info(
-            output,
-        )
-
-        job.update_media_info(
-            duration=info.get(
-                "duration",
-                0,
-            ),
-            bitrate=info.get(
-                "bitrate",
-                0,
-            ),
-        )

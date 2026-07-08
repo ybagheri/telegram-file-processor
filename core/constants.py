@@ -8,4 +8,12 @@ class MessageType(str, Enum):
     ERROR = "error"
     INFO = "info"
 
+
+class JobStatus(str, Enum):
+    PENDING = "PENDING"
+    PROCESSING = "PROCESSING"
+    COMPLETED = "COMPLETED"
+    FAILED = "FAILED"
+
+
 PROJECT_IDENTIFIER = "IELTS"
