@@ -98,12 +98,32 @@ class TelegramService:
         self,
         path: Path,
         caption: dict,
+        *,
+        thumb: Path | None = None,
+        voice: bool = False,
+        supports_streaming: bool = False,
     ):
+
+        kwargs = {
+            "caption": Protocol.encode(caption),
+        }
+
+        if thumb and thumb.exists():
+
+            kwargs["thumb"] = str(thumb)
+
+        if voice:
+
+            kwargs["voice"] = True
+
+        if supports_streaming:
+
+            kwargs["supports_streaming"] = True
 
         await self.client.send_file(
             self.bridge_group_id,
             str(path),
-            caption=Protocol.encode(caption),
+            **kwargs,
         )
 
     # ------------------------------------------------------------------
@@ -133,4 +153,81 @@ class TelegramService:
             from_chat_id=from_chat_id,
             message_id=message_id,
             caption=caption,
+        )
+
+    # ------------------------------------------------------------------
+    # Bridge Message
+    # ------------------------------------------------------------------
+
+    async def send_bridge_message(
+        self,
+        payload: dict,
+    ):
+
+        await self.bot.send_message(
+            self.bridge_group_id,
+            Protocol.encode(
+                payload,
+            ),
+        )
+
+    # ------------------------------------------------------------------
+    # Copy User Media To Bridge
+    # ------------------------------------------------------------------
+
+    async def copy_user_message_to_bridge(
+        self,
+        *,
+        chat_id: int,
+        message_id: int,
+        caption: dict,
+    ):
+
+        await self.bot.copy_message(
+            chat_id=self.bridge_group_id,
+            from_chat_id=chat_id,
+            message_id=message_id,
+            caption=Protocol.encode(
+                caption,
+            ),
+        )
+
+    # ------------------------------------------------------------------
+    # Upload Output
+    # ------------------------------------------------------------------
+
+    async def upload_file(
+        self,
+        path: Path,
+        caption: dict,
+        *,
+        thumb: Path | None = None,
+        voice: bool = False,
+        supports_streaming: bool = False,
+    ):
+
+        kwargs = {
+            "caption": Protocol.encode(
+                caption,
+            ),
+        }
+
+        if thumb and thumb.exists():
+
+            kwargs["thumb"] = str(
+                thumb,
+            )
+
+        if voice:
+
+            kwargs["voice"] = True
+
+        if supports_streaming:
+
+            kwargs["supports_streaming"] = True
+
+        await self.client.send_file(
+            self.bridge_group_id,
+            str(path),
+            **kwargs,
         )

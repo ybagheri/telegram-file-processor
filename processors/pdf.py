@@ -1,20 +1,64 @@
+from __future__ import annotations
+
+from core.constants import JobStatus
 from core.logger import get_logger
+
+from services.pdf import pdf_service
 
 logger = get_logger(__name__)
 
 
 class PDFProcessor:
 
-    async def process(self, job):
+    async def process(
+        self,
+        job,
+    ):
 
-        logger.info(f"PDF processing started ({job.job_id})")
+        logger.info(
+            "PDF job started (%s)",
+            job.job_id,
+        )
 
-        if job.input_file is None:
-            raise ValueError("Input file not found")
+        job.set_status(
+            JobStatus.PROCESSING,
+        )
 
-        # TODO
-        # Compress PDF
+        output = job.output_dir / (
+            f"{job.stem}.pdf"
+        )
 
-        job.add_output(job.input_file)
+        ok = await pdf_service.optimize(
 
-        logger.info(f"PDF processing finished ({job.job_id})")
+            input_file=job.input_file,
+
+            output_file=output,
+
+        )
+
+        if not ok:
+
+            logger.error(
+                "PDF optimization failed."
+            )
+
+            job.set_status(
+                JobStatus.FAILED,
+            )
+
+            return False
+
+        job.add_output(
+            output,
+        )
+
+        job.set_status(
+            JobStatus.COMPLETED,
+        )
+
+        logger.info(
+            "PDF completed (%s)",
+            job.job_id,
+        )
+
+        return True

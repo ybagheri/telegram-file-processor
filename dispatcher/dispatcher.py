@@ -13,54 +13,68 @@ class Dispatcher:
     def __init__(self):
 
         self._processors = {
+
             "VIDEO": VideoProcessor(),
+
             "AUDIO": AudioProcessor(),
+
             "PDF": PDFProcessor(),
+
             "ARCHIVE": ArchiveProcessor(),
+
         }
 
-    async def dispatch(self, job):
+    async def dispatch(
+        self,
+        job,
+    ) -> bool:
 
-        file_type = (job.file_type or "").upper()
+        file_type = (
 
-        processor = self._processors.get(file_type)
+            job.file_type or ""
+
+        ).upper()
+
+        processor = self._processors.get(
+            file_type,
+        )
 
         if processor is None:
+
             logger.error(
+
                 "Unsupported file type: %s",
+
                 file_type,
+
             )
-            job.status = "FAILED"
+
             return False
 
         logger.info(
-            "Job %s -> %s",
-            job.job_id,
-            processor.__class__.__name__,
-        )
 
-        job.status = "PROCESSING"
+            "Job %s -> %s",
+
+            job.job_id,
+
+            processor.__class__.__name__,
+
+        )
 
         try:
 
-            await processor.process(job)
-
-            job.status = "COMPLETED"
-
-            logger.info(
-                "Job %s completed",
-                job.job_id,
+            return await processor.process(
+                job,
             )
-
-            return True
 
         except Exception:
 
             logger.exception(
-                "Processor failed for job %s",
-                job.job_id,
-            )
 
-            job.status = "FAILED"
+                "Processor failed (%s)",
+
+                job.job_id,
+
+            )
 
             return False
