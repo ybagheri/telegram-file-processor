@@ -102,8 +102,12 @@ async def process_job(payload: dict):
                 user_id=job.user_id,
                 job_id=job.job_id,
                 files=[p.name for p in job.output_files],
+                target_chat_id=job.options.target_chat_id,
             )
         )
+
+        as_video = job.options.upload_as == "video"
+        as_voice = job.options.quality == "voice"
 
         for output in job.output_files:
 
@@ -113,7 +117,10 @@ async def process_job(payload: dict):
                     user_id=job.user_id,
                     job_id=job.job_id,
                     files=[output.name],
+                    target_chat_id=job.options.target_chat_id,
                 ),
+                force_document=not (as_video or as_voice),
+                voice_note=as_voice,
             )
 
     if not success or not job.has_output:
@@ -123,6 +130,7 @@ async def process_job(payload: dict):
                 user_id=job.user_id,
                 job_id=job.job_id,
                 message=error_message if not job.has_output else "Some files failed to process",
+                target_chat_id=job.options.target_chat_id,
             )
         )
 

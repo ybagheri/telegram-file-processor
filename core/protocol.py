@@ -56,6 +56,7 @@ class Protocol:
         user_id: int,
         job_id: str,
         files: list | None = None,
+        target_chat_id: int = 0,
     ) -> dict:
 
         return {
@@ -63,6 +64,7 @@ class Protocol:
             "user_id": user_id,
             "job_id": job_id,
             "files": files or [],
+            "target_chat_id": target_chat_id,
         }
 
     @staticmethod
@@ -101,6 +103,7 @@ class Protocol:
         user_id: int,
         job_id: str,
         message: str,
+        target_chat_id: int = 0,
     ) -> dict:
 
         return {
@@ -108,6 +111,7 @@ class Protocol:
             "user_id": user_id,
             "job_id": job_id,
             "message": message,
+            "target_chat_id": target_chat_id,
         }
 
     @staticmethod

@@ -36,6 +36,14 @@ class JobOptions:
 
     thumbnail_second: int = 3
 
+    logo_path: str = ""
+
+    upload_as: str = "document"
+
+    target_chat_id: int = 0
+
+    custom_thumbnail: str = ""
+
     # ==========================================
     # Rename
     # ==========================================

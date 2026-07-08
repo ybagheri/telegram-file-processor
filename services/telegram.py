@@ -111,27 +111,49 @@ class TelegramService:
         self,
         path: Path,
         caption: dict,
+        *,
+        force_document: bool = True,
+        voice_note: bool = False,
     ):
         await self.client.send_file(
             self.bridge_group_id,
             str(path),
             caption=Protocol.encode(caption),
+            force_document=force_document,
+            voice_note=voice_note,
         )
 
     # ------------------------------------------------------------------
-    # User (bot -> end user, via Bot API)
+    # Delivery (bot -> destination chat, which may be the user or a
+    # channel/group the user configured as their upload target)
     # ------------------------------------------------------------------
 
     async def send_text(
         self,
-        user_id: int,
+        chat_id: int,
         text: str,
     ):
         await self.bot.send_message(
-            user_id,
+            chat_id,
             text,
         )
 
+    async def copy_message_to(
+        self,
+        *,
+        chat_id: int,
+        from_chat_id: int,
+        message_id: int,
+        caption: str | None = None,
+    ):
+        await self.bot.copy_message(
+            chat_id=chat_id,
+            from_chat_id=from_chat_id,
+            message_id=message_id,
+            caption=caption,
+        )
+
+    # Kept for backwards compatibility with earlier call sites.
     async def copy_message_to_user(
         self,
         *,
@@ -140,7 +162,7 @@ class TelegramService:
         message_id: int,
         caption: str | None = None,
     ):
-        await self.bot.copy_message(
+        await self.copy_message_to(
             chat_id=user_id,
             from_chat_id=from_chat_id,
             message_id=message_id,

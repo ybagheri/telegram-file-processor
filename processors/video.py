@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+from pathlib import Path
+
 from config import (
     Metadata,
     Processing,
@@ -49,6 +51,11 @@ class VideoProcessor:
 
         output = job.output_dir / (job.stem + ".mp4")
 
+        logo_path = None
+
+        if job.options.watermark:
+            logo_path = Path(job.options.logo_path) if job.options.logo_path else Paths.LOGO_FILE
+
         ok = await media_service.convert_video(
             input_file=job.input_file,
             output_file=output,
@@ -56,7 +63,7 @@ class VideoProcessor:
             height=profile["height"],
             crf=profile["crf"],
             preset=profile["preset"],
-            logo=Paths.LOGO_FILE if job.options.watermark else None,
+            logo=logo_path,
         )
 
         if not ok:
@@ -67,14 +74,18 @@ class VideoProcessor:
 
         thumb = job.thumbs_dir / (output.stem + ".jpg")
 
-        thumb_ok = await media_service.generate_thumbnail(
-            output,
-            thumb,
-            job.options.thumbnail_second or Processing.THUMBNAIL_SECOND,
-        )
-
-        if thumb_ok:
+        if job.options.custom_thumbnail and Path(job.options.custom_thumbnail).exists():
+            media_service.copy(Path(job.options.custom_thumbnail), thumb)
             job.set_thumbnail(thumb)
+        else:
+            thumb_ok = await media_service.generate_thumbnail(
+                output,
+                thumb,
+                job.options.thumbnail_second or Processing.THUMBNAIL_SECOND,
+            )
+
+            if thumb_ok:
+                job.set_thumbnail(thumb)
 
         info = media_service.get_video_info(output)
 

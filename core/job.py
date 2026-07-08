@@ -254,6 +254,10 @@ class Job:
     @property
     def stem(self) -> str:
 
+        if self.options and self.options.rename_to:
+
+            return self.options.rename_to
+
         if self.original_name:
 
             return Path(self.original_name).stem

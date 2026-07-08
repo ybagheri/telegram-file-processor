@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+from pathlib import Path
+
 from config import Metadata
 from core.constants import JobStatus
 from core.logger import get_logger
@@ -38,6 +40,11 @@ class AudioProcessor:
             )
         except Exception as e:
             logger.warning(f"Could not read audio info ({job.job_id}): {e}")
+
+        if job.options.custom_thumbnail and Path(job.options.custom_thumbnail).exists():
+            cover = job.thumbs_dir / "cover.jpg"
+            media_service.copy(Path(job.options.custom_thumbnail), cover)
+            job.set_thumbnail(cover)
 
         title = job.options.title or tag_service.build_title(job.original_name)
         artist = job.options.artist or Metadata.DEFAULT_ARTIST
