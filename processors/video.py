@@ -64,6 +64,7 @@ class VideoProcessor:
             crf=profile["crf"],
             preset=profile["preset"],
             logo=logo_path,
+            logo_position=job.options.logo_position,
         )
 
         if not ok:
@@ -75,7 +76,7 @@ class VideoProcessor:
         thumb = job.thumbs_dir / (output.stem + ".jpg")
 
         if job.options.custom_thumbnail and Path(job.options.custom_thumbnail).exists():
-            media_service.copy(Path(job.options.custom_thumbnail), thumb)
+            await media_service.normalize_thumbnail(Path(job.options.custom_thumbnail), thumb)
             job.set_thumbnail(thumb)
         else:
             thumb_ok = await media_service.generate_thumbnail(

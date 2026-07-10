@@ -30,6 +30,36 @@ QUALITY_LABELS = {
     "mp3": "🎵 فقط صدا (mp3)", "m4a": "🎧 صدا (m4a)", "voice": "🎙 وویس",
 }
 
+POSITION_ICONS = {
+    "top_left": "↖️", "top_center": "⬆️", "top_right": "↗️",
+    "middle_left": "⬅️", "center": "⏺", "middle_right": "➡️",
+    "bottom_left": "↙️", "bottom_center": "⬇️", "bottom_right": "↘️",
+}
+
+POSITION_LABELS_FA = {
+    "top_left": "بالا چپ", "top_center": "بالا وسط", "top_right": "بالا راست",
+    "middle_left": "وسط چپ", "center": "مرکز", "middle_right": "وسط راست",
+    "bottom_left": "پایین چپ", "bottom_center": "پایین وسط", "bottom_right": "پایین راست",
+}
+
+POSITION_GRID = [
+    ["top_left", "top_center", "top_right"],
+    ["middle_left", "center", "middle_right"],
+    ["bottom_left", "bottom_center", "bottom_right"],
+]
+
+
+def logo_position_keyboard(current: str) -> InlineKeyboardMarkup:
+    rows = []
+    for grid_row in POSITION_GRID:
+        row = []
+        for pos in grid_row:
+            icon = POSITION_ICONS[pos]
+            text = f"✅{icon}" if pos == current else icon
+            row.append(InlineKeyboardButton(text=text, callback_data=f"slogopos:{pos}"))
+        rows.append(row)
+    return InlineKeyboardMarkup(inline_keyboard=rows)
+
 
 @dataclass
 class PendingFile:
@@ -118,6 +148,8 @@ def settings_text_and_keyboard(user_id: int) -> dict:
         f"📤 مقصد ارسال پیش‌فرض: {s['target_label']}\n"
         f"🎤 خواننده پیش‌فرض: {s['artist'] or '—'}\n"
         f"🖼 لوگوی واترمارک: {'تنظیم شده' if s['logo_path'] else 'پیش‌فرض سیستم'}\n"
+        f"📍 محل واترمارک: {POSITION_LABELS_FA.get(s['logo_position'], s['logo_position'])}\n"
+        f"📝 کپشن پیش‌فرض مدیاها: {s['media_caption'] or '— (بدون کپشن)'}\n"
     )
 
     kb = InlineKeyboardMarkup(inline_keyboard=[
@@ -133,6 +165,8 @@ def settings_text_and_keyboard(user_id: int) -> dict:
         [InlineKeyboardButton(text="📤 تغییر مقصد پیش‌فرض", callback_data="s:target")],
         [InlineKeyboardButton(text="🎤 تغییر خواننده پیش‌فرض", callback_data="s:artist")],
         [InlineKeyboardButton(text="🖼 تغییر لوگوی واترمارک", callback_data="s:logo")],
+        [InlineKeyboardButton(text="📍 تغییر محل واترمارک", callback_data="s:logopos")],
+        [InlineKeyboardButton(text="📝 تغییر کپشن پیش‌فرض", callback_data="s:caption")],
     ])
 
     return {"text": text, "reply_markup": kb}
@@ -211,12 +245,40 @@ async def settings_logo(callback: CallbackQuery):
     await callback.answer()
 
 
+@dp.callback_query(F.data == "s:logopos")
+async def settings_logo_position(callback: CallbackQuery):
+    current = settings_store.get(callback.from_user.id)["logo_position"]
+    await callback.message.edit_text(
+        "📍 محل قرارگیری واترمارک روی ویدیو را انتخاب کنید:",
+        reply_markup=logo_position_keyboard(current),
+    )
+    await callback.answer()
+
+
+@dp.callback_query(F.data.startswith("slogopos:"))
+async def settings_logo_position_pick(callback: CallbackQuery):
+    position = callback.data.split(":", 1)[1]
+    await settings_store.update(callback.from_user.id, logo_position=position)
+    await callback.message.edit_text(**settings_text_and_keyboard(callback.from_user.id))
+    await callback.answer(f"موقعیت: {POSITION_LABELS_FA.get(position, position)}")
+
+
 @dp.callback_query(F.data == "s:target")
 async def settings_target(callback: CallbackQuery):
     awaiting_state[callback.from_user.id] = "settings_target"
     await callback.message.answer(
         "یک پیام از چت مقصد برای من فوروارد کنید یا @username آن را بفرستید.\n"
         "⚠️ ربات باید عضو آن گروه/کانال باشد."
+    )
+    await callback.answer()
+
+
+@dp.callback_query(F.data == "s:caption")
+async def settings_caption(callback: CallbackQuery):
+    awaiting_state[callback.from_user.id] = "settings_caption"
+    await callback.message.answer(
+        "متن کپشن پیش‌فرض برای مدیاهای تحویلی را بفرستید.\n"
+        "برای حذف کپشن (بدون کپشن)، کلمه‌ی «حذف» را بفرستید."
     )
     await callback.answer()
 
@@ -391,8 +453,12 @@ async def handle_awaited_input(message: Message, state: str) -> bool:
         await bot.download(message.photo[-1], destination=path)
         await settings_store.update(user_id, logo_path=str(path))
         awaiting_state.pop(user_id, None)
-        await message.answer("✅ لوگو ذخیره شد.")
-        await message.answer(**settings_text_and_keyboard(user_id))
+        current = settings_store.get(user_id)["logo_position"]
+        await message.answer(
+            "✅ لوگو ذخیره شد.\n"
+            "حالا محل قرارگیری واترمارک روی ویدیو را انتخاب کنید:",
+            reply_markup=logo_position_keyboard(current),
+        )
         return True
 
     if state == "settings_target":
@@ -401,6 +467,15 @@ async def handle_awaited_input(message: Message, state: str) -> bool:
             await message.answer("چت را نشناختم. یک پیام از آن فوروارد کنید یا @username بفرستید.")
             return True
         await settings_store.update(user_id, target_chat_id=chat_id, target_label=label)
+        awaiting_state.pop(user_id, None)
+        await message.answer(**settings_text_and_keyboard(user_id))
+        return True
+
+    if state == "settings_caption":
+        if not message.text:
+            return False
+        new_caption = "" if message.text.strip() in ("حذف", "-", "none", "None") else message.text
+        await settings_store.update(user_id, media_caption=new_caption)
         awaiting_state.pop(user_id, None)
         await message.answer(**settings_text_and_keyboard(user_id))
         return True
@@ -536,6 +611,7 @@ async def handle_private_message(message: Message):
             "target_label": defaults["target_label"],
             "artist": defaults["artist"],
             "logo_path": defaults["logo_path"],
+            "logo_position": defaults["logo_position"],
             "title": "",
             "rename_to": "",
             "custom_thumbnail": "",
@@ -581,12 +657,19 @@ async def handle_bridge_message(message: Message):
 
     if message_type == MessageType.RESULT.value:
 
-        if message.document or message.video or message.audio:
+        if message.document or message.video or message.audio or message.voice:
+
+            # copyMessage keeps the ORIGINAL caption when caption is not
+            # given at all, so we must always pass an explicit string here
+            # (empty by default) — otherwise the raw protocol JSON caption
+            # used for the bridge would leak straight through to the user.
+            user_caption = settings_store.get(user_id).get("media_caption") or ""
 
             await telegram_service.copy_message_to(
                 chat_id=destination,
                 from_chat_id=message.chat.id,
                 message_id=message.message_id,
+                caption=user_caption,
             )
 
         return

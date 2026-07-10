@@ -11,11 +11,13 @@ SETTINGS_FILE = Paths.CONFIG / "user_settings.json"
 DEFAULTS = {
     "quality": "360",
     "watermark": True,
-    "upload_as": "document",   # "document" | "video"
+    "upload_as": "video",      # "document" | "video" (video = proper player + thumbnail)
     "target_chat_id": 0,       # 0 => deliver back to the user
     "target_label": "خودم",
     "artist": "",
     "logo_path": "",
+    "logo_position": "bottom_right",
+    "media_caption": "",       # empty => no caption on delivered media
 }
 
 

@@ -43,7 +43,7 @@ class AudioProcessor:
 
         if job.options.custom_thumbnail and Path(job.options.custom_thumbnail).exists():
             cover = job.thumbs_dir / "cover.jpg"
-            media_service.copy(Path(job.options.custom_thumbnail), cover)
+            await media_service.normalize_thumbnail(Path(job.options.custom_thumbnail), cover)
             job.set_thumbnail(cover)
 
         title = job.options.title or tag_service.build_title(job.original_name)

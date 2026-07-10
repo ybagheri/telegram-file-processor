@@ -38,7 +38,9 @@ class JobOptions:
 
     logo_path: str = ""
 
-    upload_as: str = "document"
+    logo_position: str = "bottom_right"
+
+    upload_as: str = "video"
 
     target_chat_id: int = 0
 

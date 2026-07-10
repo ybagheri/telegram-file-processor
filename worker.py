@@ -1,6 +1,7 @@
 import asyncio
 
 from telethon import events
+from telethon.errors import FloodWaitError
 
 from config import Telegram
 from core.constants import MessageType
@@ -91,37 +92,115 @@ async def process_job(payload: dict):
     except Exception as e:
         logger.exception("Unhandled error while dispatching job %s", job.job_id)
         success = False
-        error_message = str(e) or "Processing failed"
+        error_message = (str(e) or "Processing failed")[:300]
     else:
         error_message = "Processing failed"
 
     if job.has_output:
 
-        await telegram_service.send_result(
-            Protocol.create_result(
-                user_id=job.user_id,
-                job_id=job.job_id,
-                files=[p.name for p in job.output_files],
-                target_chat_id=job.options.target_chat_id,
-            )
-        )
+        all_names = [p.name for p in job.output_files]
+        preview_names = all_names[:15]
 
-        as_video = job.options.upload_as == "video"
-        as_voice = job.options.quality == "voice"
-
-        for output in job.output_files:
-
-            await telegram_service.upload_file(
-                output,
+        try:
+            await telegram_service.send_result(
                 Protocol.create_result(
                     user_id=job.user_id,
                     job_id=job.job_id,
-                    files=[output.name],
+                    files=preview_names,
                     target_chat_id=job.options.target_chat_id,
-                ),
-                force_document=not (as_video or as_voice),
-                voice_note=as_voice,
+                )
             )
+        except Exception:
+            # This is just an informational ping; a failure here (e.g. the
+            # message ended up too long for a huge batch) must never block
+            # the actual file uploads below.
+            logger.exception(
+                "Failed to send result summary for job %s", job.job_id
+            )
+
+        as_video_toggle = job.options.upload_as == "video"
+        as_voice = job.options.quality == "voice"
+
+        is_video_conversion = (
+            job.file_type == "VIDEO"
+            and job.options.quality not in ("mp3", "m4a", "voice")
+        )
+
+        is_audio_like = (not as_voice) and (
+            job.options.quality in ("mp3", "m4a") or job.file_type == "AUDIO"
+        )
+
+        for output in job.output_files:
+
+            force_document = True
+            video_attrs = None
+            audio_attrs = None
+
+            if as_voice:
+                force_document = False
+
+            elif is_video_conversion:
+                force_document = not as_video_toggle
+                if not force_document:
+                    video_attrs = {
+                        "duration": job.duration,
+                        "width": job.width,
+                        "height": job.height,
+                    }
+
+            elif is_audio_like:
+                force_document = False
+                audio_attrs = {
+                    "duration": job.duration,
+                    "title": job.options.title,
+                    "performer": job.options.artist,
+                }
+
+            for attempt in range(2):
+
+                try:
+                    await telegram_service.upload_file(
+                        output,
+                        Protocol.create_result(
+                            user_id=job.user_id,
+                            job_id=job.job_id,
+                            files=[output.name[:200]],
+                            target_chat_id=job.options.target_chat_id,
+                        ),
+                        force_document=force_document,
+                        voice_note=as_voice,
+                        thumb=job.thumbnail,
+                        video_attributes=video_attrs,
+                        audio_attributes=audio_attrs,
+                    )
+                    break
+
+                except FloodWaitError as e:
+                    if attempt == 1:
+                        logger.exception(
+                            "Gave up uploading %s after flood wait ({job.job_id})",
+                            output.name,
+                        )
+                        break
+                    logger.warning(
+                        "Flood wait (%ss) while uploading %s, retrying once",
+                        e.seconds, output.name,
+                    )
+                    await asyncio.sleep(e.seconds + 1)
+
+                except Exception:
+                    # One bad file (too large, corrupted, etc.) must not
+                    # stop the rest of a large batch from being delivered.
+                    logger.exception(
+                        "Failed to upload output file %s for job %s",
+                        output.name, job.job_id,
+                    )
+                    break
+
+            # Small pacing delay to avoid tripping flood limits on jobs
+            # that unpack into dozens/hundreds of files (e.g. archives).
+            if len(job.output_files) > 5:
+                await asyncio.sleep(0.5)
 
     if not success or not job.has_output:
 

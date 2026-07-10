@@ -114,13 +114,43 @@ class TelegramService:
         *,
         force_document: bool = True,
         voice_note: bool = False,
+        thumb: Path | None = None,
+        video_attributes: dict | None = None,
+        audio_attributes: dict | None = None,
     ):
+        attributes = None
+
+        if video_attributes and not force_document and not voice_note:
+            from telethon.tl.types import DocumentAttributeVideo
+
+            attributes = [
+                DocumentAttributeVideo(
+                    duration=int(video_attributes.get("duration") or 0),
+                    w=int(video_attributes.get("width") or 0),
+                    h=int(video_attributes.get("height") or 0),
+                    supports_streaming=True,
+                )
+            ]
+
+        elif audio_attributes and not voice_note:
+            from telethon.tl.types import DocumentAttributeAudio
+
+            attributes = [
+                DocumentAttributeAudio(
+                    duration=int(audio_attributes.get("duration") or 0),
+                    title=audio_attributes.get("title") or None,
+                    performer=audio_attributes.get("performer") or None,
+                )
+            ]
+
         await self.client.send_file(
             self.bridge_group_id,
             str(path),
             caption=Protocol.encode(caption),
             force_document=force_document,
             voice_note=voice_note,
+            thumb=str(thumb) if thumb else None,
+            attributes=attributes,
         )
 
     # ------------------------------------------------------------------

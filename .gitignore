@@ -24,6 +24,7 @@ virtualenv/
 # ====================
 # Project Data
 # ====================
+config_data/
 downloads/
 outputs/
 logs/
@@ -31,7 +32,6 @@ sessions/
 temp/
 logo/
 *.log
-config_data/
 
 # ====================
 # Debug & Test Files

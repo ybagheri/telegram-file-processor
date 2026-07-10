@@ -211,6 +211,18 @@ class MediaService:
     # Convert Video
     # =====================================================
 
+    LOGO_POSITIONS = {
+        "top_left": "15:15",
+        "top_center": "(W-w)/2:15",
+        "top_right": "W-w-15:15",
+        "middle_left": "15:(H-h)/2",
+        "center": "(W-w)/2:(H-h)/2",
+        "middle_right": "W-w-15:(H-h)/2",
+        "bottom_left": "15:H-h-15",
+        "bottom_center": "(W-w)/2:H-h-15",
+        "bottom_right": "W-w-15:H-h-15",
+    }
+
     async def convert_video(
         self,
         *,
@@ -221,16 +233,25 @@ class MediaService:
         crf: int,
         preset: str,
         logo: Path | None = None,
+        logo_position: str = "bottom_right",
     ) -> bool:
 
         vf = f"scale={width}:{height}:force_original_aspect_ratio=decrease,pad={width}:{height}:(ow-iw)/2:(oh-ih)/2"
 
         if logo and logo.exists():
 
+            max_w = max(width // 5, 2)
+            max_h = max(height // 5, 2)
+
+            overlay_xy = self.LOGO_POSITIONS.get(
+                logo_position,
+                self.LOGO_POSITIONS["bottom_right"],
+            )
+
             vf = (
-                f"movie={logo}[logo];"
+                f"movie={logo},scale=w={max_w}:h={max_h}:force_original_aspect_ratio=decrease[wm];"
                 f"[0:v]{vf}[video];"
-                f"[video][logo]overlay=W-w-15:H-h-15"
+                f"[video][wm]overlay={overlay_xy}"
             )
 
         command = [
@@ -419,6 +440,41 @@ class MediaService:
 
             "-frames:v",
             "1",
+
+            "-vf",
+            "scale='min(320,iw)':'min(320,ih)':force_original_aspect_ratio=decrease",
+
+            "-q:v",
+            "2",
+
+            str(output_file),
+
+        ]
+
+        return await self._run(command)
+
+    async def normalize_thumbnail(
+        self,
+        input_file: Path,
+        output_file: Path,
+    ) -> bool:
+        """Re-encode an arbitrary image (e.g. a user-supplied photo) into a
+        JPEG that respects Telegram's thumbnail limits (<=320x320)."""
+
+        command = [
+
+            self.ffmpeg,
+
+            "-y",
+
+            "-i",
+            str(input_file),
+
+            "-frames:v",
+            "1",
+
+            "-vf",
+            "scale='min(320,iw)':'min(320,ih)':force_original_aspect_ratio=decrease",
 
             "-q:v",
             "2",
