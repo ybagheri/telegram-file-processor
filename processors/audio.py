@@ -24,39 +24,44 @@ class AudioProcessor:
         job.set_status(JobStatus.PROCESSING)
 
         suffix = job.input_file.suffix.lower() or ".mp3"
-        output = job.output_dir / (job.stem + suffix)
+        output = job.resolve_output_dir() / (job.stem + suffix)
 
         if job.input_file != output:
             media_service.copy(job.input_file, output)
         else:
             output = job.input_file
 
+        entry = job.add_output(output, kind="audio")
+
+        if entry is None:
+            job.set_status(JobStatus.FAILED)
+            return False
+
         try:
             info = media_service.get_audio_info(output)
-
-            job.update_media_info(
-                duration=info["duration"],
-                bitrate=info["bitrate"],
-            )
+            entry.duration = info["duration"]
         except Exception as e:
             logger.warning(f"Could not read audio info ({job.job_id}): {e}")
 
+        cover = None
+
         if job.options.custom_thumbnail and Path(job.options.custom_thumbnail).exists():
-            cover = job.thumbs_dir / "cover.jpg"
+            cover = job.thumbs_dir / f"cover_{job.job_id}_{len(job.output_files)}.jpg"
             await media_service.normalize_thumbnail(Path(job.options.custom_thumbnail), cover)
-            job.set_thumbnail(cover)
+            entry.thumbnail = cover
 
         title = job.options.title or tag_service.build_title(job.original_name)
         artist = job.options.artist or Metadata.DEFAULT_ARTIST
+
+        entry.title = title
+        entry.artist = artist
 
         tag_service.update_audio(
             output,
             title=title,
             artist=artist,
-            cover=job.thumbnail,
+            cover=cover,
         )
-
-        job.add_output(output)
 
         job.set_status(JobStatus.COMPLETED)
 

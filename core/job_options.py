@@ -47,6 +47,14 @@ class JobOptions:
     custom_thumbnail: str = ""
 
     # ==========================================
+    # Archive extraction ordering
+    # ==========================================
+
+    sort_mode: str = "name"    # "name" | "date"
+
+    sort_order: str = "asc"    # "asc" | "desc"
+
+    # ==========================================
     # Rename
     # ==========================================
 

@@ -150,6 +150,8 @@ def settings_text_and_keyboard(user_id: int) -> dict:
         f"🖼 لوگوی واترمارک: {'تنظیم شده' if s['logo_path'] else 'پیش‌فرض سیستم'}\n"
         f"📍 محل واترمارک: {POSITION_LABELS_FA.get(s['logo_position'], s['logo_position'])}\n"
         f"📝 کپشن پیش‌فرض مدیاها: {s['media_caption'] or '— (بدون کپشن)'}\n"
+        f"🔤 ترتیب فایل‌های آرشیو: {'بر اساس تاریخ' if s['sort_mode'] == 'date' else 'بر اساس نام'} "
+        f"({'نزولی' if s['sort_order'] == 'desc' else 'صعودی'})\n"
     )
 
     kb = InlineKeyboardMarkup(inline_keyboard=[
@@ -167,6 +169,14 @@ def settings_text_and_keyboard(user_id: int) -> dict:
         [InlineKeyboardButton(text="🖼 تغییر لوگوی واترمارک", callback_data="s:logo")],
         [InlineKeyboardButton(text="📍 تغییر محل واترمارک", callback_data="s:logopos")],
         [InlineKeyboardButton(text="📝 تغییر کپشن پیش‌فرض", callback_data="s:caption")],
+        [InlineKeyboardButton(
+            text=f"🔤 ترتیب: {'تاریخ' if s['sort_mode'] == 'date' else 'نام'} کن",
+            callback_data="s:sortmode",
+        ),
+         InlineKeyboardButton(
+            text=f"↕️ جهت: {'نزولی' if s['sort_order'] == 'desc' else 'صعودی'} کن",
+            callback_data="s:sortorder",
+        )],
     ])
 
     return {"text": text, "reply_markup": kb}
@@ -227,6 +237,24 @@ async def settings_upload_as(callback: CallbackQuery):
     s = settings_store.get(callback.from_user.id)
     new_val = "video" if s["upload_as"] == "document" else "document"
     await settings_store.update(callback.from_user.id, upload_as=new_val)
+    await callback.message.edit_text(**settings_text_and_keyboard(callback.from_user.id))
+    await callback.answer("بروزرسانی شد")
+
+
+@dp.callback_query(F.data == "s:sortmode")
+async def settings_sort_mode(callback: CallbackQuery):
+    s = settings_store.get(callback.from_user.id)
+    new_val = "date" if s["sort_mode"] == "name" else "name"
+    await settings_store.update(callback.from_user.id, sort_mode=new_val)
+    await callback.message.edit_text(**settings_text_and_keyboard(callback.from_user.id))
+    await callback.answer("بروزرسانی شد")
+
+
+@dp.callback_query(F.data == "s:sortorder")
+async def settings_sort_order(callback: CallbackQuery):
+    s = settings_store.get(callback.from_user.id)
+    new_val = "desc" if s["sort_order"] == "asc" else "asc"
+    await settings_store.update(callback.from_user.id, sort_order=new_val)
     await callback.message.edit_text(**settings_text_and_keyboard(callback.from_user.id))
     await callback.answer("بروزرسانی شد")
 
@@ -615,6 +643,8 @@ async def handle_private_message(message: Message):
             "title": "",
             "rename_to": "",
             "custom_thumbnail": "",
+            "sort_mode": defaults["sort_mode"],
+            "sort_order": defaults["sort_order"],
         },
     )
 
@@ -700,7 +730,7 @@ async def handle_bridge_message(message: Message):
     if message_type == MessageType.INFO.value:
 
         await telegram_service.send_text(
-            user_id,
+            destination,
             payload.get("message", ""),
         )
 

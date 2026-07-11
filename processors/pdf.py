@@ -19,7 +19,7 @@ class PDFProcessor:
 
         job.set_status(JobStatus.PROCESSING)
 
-        output = job.output_dir / (job.stem + ".pdf")
+        output = job.resolve_output_dir() / (job.stem + ".pdf")
 
         try:
             import fitz  # PyMuPDF
@@ -49,7 +49,7 @@ class PDFProcessor:
             )
             media_service.copy(job.input_file, output)
 
-        job.add_output(output)
+        job.add_output(output, kind="document")
 
         job.set_status(JobStatus.COMPLETED)
 

@@ -12,6 +12,32 @@ from core.constants import JobStatus
 from core.job_options import JobOptions
 
 
+@dataclass
+class OutputFile:
+    """One delivered result. Kept separate from the shared Job fields
+    because a single archive job can produce many outputs of different
+    kinds (video + audio + pdf), each needing its own Telegram delivery
+    behaviour, metadata and thumbnail."""
+
+    path: Path
+
+    kind: str = "document"   # "video" | "audio" | "voice" | "document"
+
+    title: str = ""
+
+    artist: str = ""
+
+    duration: int = 0
+
+    width: int = 0
+
+    height: int = 0
+
+    thumbnail: Path | None = None
+
+    folder: str = ""         # path relative to the archive root, "" = top level
+
+
 @dataclass(slots=True)
 class Job:
 
@@ -79,9 +105,14 @@ class Job:
         default_factory=list
     )
 
-    output_files: list[Path] = field(
+    output_files: list[OutputFile] = field(
         default_factory=list
     )
+
+    # Transient marker: set by the archive processor while recursively
+    # dispatching an extracted file, so that processor.add_output() calls
+    # know which folder (relative to the archive root) the file came from.
+    current_extract_folder: str = ""
 
     thumbnail: Path | None = None
 
@@ -200,11 +231,35 @@ class Job:
     def add_output(
         self,
         file: Path,
-    ):
+        *,
+        kind: str = "document",
+        title: str = "",
+        artist: str = "",
+        duration: int = 0,
+        width: int = 0,
+        height: int = 0,
+        thumbnail: Path | None = None,
+        folder: str | None = None,
+    ) -> OutputFile | None:
 
-        if file.exists():
+        if not file.exists():
+            return None
 
-            self.output_files.append(file)
+        entry = OutputFile(
+            path=file,
+            kind=kind,
+            title=title,
+            artist=artist,
+            duration=duration,
+            width=width,
+            height=height,
+            thumbnail=thumbnail,
+            folder=folder if folder is not None else self.current_extract_folder,
+        )
+
+        self.output_files.append(entry)
+
+        return entry
 
     def add_extracted(
         self,
@@ -249,7 +304,7 @@ class Job:
 
             return None
 
-        return self.output_files[0]
+        return self.output_files[0].path
 
     @property
     def stem(self) -> str:
@@ -263,6 +318,19 @@ class Job:
             return Path(self.original_name).stem
 
         return self.job_id
+
+    def resolve_output_dir(self) -> Path:
+        """Output directory for the file currently being processed. When
+        processing an item extracted from an archive subfolder, outputs are
+        nested under that same relative folder so that two files sharing a
+        name in different folders never collide."""
+
+        if not self.current_extract_folder:
+            return self.output_dir
+
+        target = self.output_dir / self.current_extract_folder
+        target.mkdir(parents=True, exist_ok=True)
+        return target
 
     # =====================================================
     # Cleanup

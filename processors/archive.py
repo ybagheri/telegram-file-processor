@@ -1,7 +1,12 @@
 from __future__ import annotations
 
 import asyncio
+import os
+import re
 import zipfile
+from pathlib import Path
+
+from telethon.errors import FloodWaitError
 
 from core.constants import JobStatus
 from core.logger import get_logger
@@ -21,6 +26,18 @@ class _PasswordRequired(Exception):
 
 class _WrongPassword(Exception):
     pass
+
+
+def _natural_key(text: str):
+    """Sort key that treats embedded numbers numerically, so '2' sorts
+    before '10' instead of after it (like a human would expect)."""
+
+    stem = Path(text).stem or text
+
+    return [
+        (0, int(part)) if part.isdigit() else (1, part.lower())
+        for part in re.split(r"(\d+)", stem) if part
+    ]
 
 
 class ArchiveProcessor:
@@ -62,15 +79,11 @@ class ArchiveProcessor:
 
                 password = await self._request_password(job)
 
-        extracted_files = sorted(
-            p for p in job.extracted_dir.rglob("*") if p.is_file()
-        )
-
-        if not extracted_files:
+        if not job.extracted_dir.exists() or not any(job.extracted_dir.iterdir()):
             job.set_status(JobStatus.FAILED)
             raise ValueError("Archive contained no files")
 
-        await self._process_extracted(job, extracted_files)
+        await self._walk_and_process(job)
 
         if job.has_output:
             job.set_status(JobStatus.COMPLETED)
@@ -185,10 +198,10 @@ class ArchiveProcessor:
             raise
 
     # =====================================================
-    # Recursive processing of extracted files
+    # Folder-by-folder, ordered processing of extracted files
     # =====================================================
 
-    async def _process_extracted(self, job, extracted_files):
+    async def _walk_and_process(self, job):
 
         # Imported lazily to avoid a circular import
         # (dispatcher imports this module at module load time).
@@ -197,33 +210,110 @@ class ArchiveProcessor:
 
         dispatcher = Dispatcher()
 
+        reverse = job.options.sort_order == "desc"
+        sort_by_date = job.options.sort_mode == "date"
+
         original_input = job.input_file
         original_type = job.file_type
         original_name = job.original_name
+        original_rename = job.options.rename_to
+
+        # A rename only makes sense for a single file; for a whole archive
+        # it would collapse every extracted file onto the same output name.
+        job.options.rename_to = ""
 
         try:
-            for extracted in extracted_files:
+            for dirpath, dirnames, filenames in os.walk(job.extracted_dir):
 
-                file_type = FileTypeDetector.detect("", extracted.name)
+                dirnames.sort(key=_natural_key, reverse=reverse)
 
-                job.input_file = extracted
-                job.original_name = extracted.name
+                root = Path(dirpath)
+                relative = root.relative_to(job.extracted_dir)
+                relative_str = "" if str(relative) == "." else str(relative).replace(os.sep, "/")
 
-                if file_type == "UNKNOWN":
-                    job.add_output(extracted)
-                    continue
+                if relative_str:
+                    await self._announce_folder(job, relative_str)
 
-                job.file_type = file_type
-
-                try:
-                    await dispatcher.dispatch(job)
-                except Exception:
-                    logger.exception(
-                        f"Failed to process extracted file "
-                        f"{extracted.name} ({job.job_id})"
+                if sort_by_date:
+                    files = sorted(
+                        (root / name for name in filenames),
+                        key=lambda p: p.stat().st_mtime,
+                        reverse=reverse,
                     )
+                else:
+                    files = sorted(
+                        (root / name for name in filenames),
+                        key=lambda p: _natural_key(p.name),
+                        reverse=reverse,
+                    )
+
+                job.current_extract_folder = relative_str
+
+                for extracted in files:
+
+                    job.add_extracted(extracted)
+
+                    file_type = FileTypeDetector.detect("", extracted.name)
+
+                    job.input_file = extracted
+                    job.original_name = extracted.name
+
+                    if file_type == "UNKNOWN":
+                        job.add_output(extracted, kind="document")
+                        continue
+
+                    job.file_type = file_type
+
+                    try:
+                        await dispatcher.dispatch(job)
+                    except Exception:
+                        logger.exception(
+                            f"Failed to process extracted file "
+                            f"{extracted.name} ({job.job_id})"
+                        )
 
         finally:
             job.input_file = original_input
             job.file_type = original_type
             job.original_name = original_name
+            job.options.rename_to = original_rename
+            job.current_extract_folder = ""
+
+    async def _announce_folder(self, job, relative_str: str):
+
+        payload = Protocol.create_info(
+            user_id=job.user_id,
+            job_id=job.job_id,
+            message=f"📂 {relative_str}",
+            target_chat_id=job.options.target_chat_id,
+        )
+
+        for attempt in range(2):
+
+            try:
+                await telegram_service.send_info(payload)
+                break
+
+            except FloodWaitError as e:
+                if attempt == 1:
+                    logger.warning(
+                        f"Giving up announcing folder {relative_str} "
+                        f"after flood wait ({job.job_id})"
+                    )
+                    break
+                logger.warning(
+                    f"Flood wait ({e.seconds}s) announcing folder "
+                    f"{relative_str}, retrying once"
+                )
+                await asyncio.sleep(e.seconds + 1)
+
+            except Exception:
+                logger.exception(
+                    f"Failed to announce folder {relative_str} ({job.job_id})"
+                )
+                break
+
+        # Small pacing delay, same idea as the upload loop: archives with
+        # many nested folders would otherwise fire announcements back to
+        # back and trip Telegram's flood limits.
+        await asyncio.sleep(0.4)

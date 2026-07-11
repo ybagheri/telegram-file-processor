@@ -18,6 +18,8 @@ DEFAULTS = {
     "logo_path": "",
     "logo_position": "bottom_right",
     "media_caption": "",       # empty => no caption on delivered media
+    "sort_mode": "name",       # "name" | "date" — order of files inside an archive
+    "sort_order": "asc",       # "asc" | "desc"
 }
 
 

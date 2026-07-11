@@ -98,62 +98,67 @@ async def process_job(payload: dict):
 
     if job.has_output:
 
-        all_names = [p.name for p in job.output_files]
+        all_names = [entry.path.name for entry in job.output_files]
         preview_names = all_names[:15]
 
-        try:
-            await telegram_service.send_result(
-                Protocol.create_result(
-                    user_id=job.user_id,
-                    job_id=job.job_id,
-                    files=preview_names,
-                    target_chat_id=job.options.target_chat_id,
+        for attempt in range(2):
+            try:
+                await telegram_service.send_result(
+                    Protocol.create_result(
+                        user_id=job.user_id,
+                        job_id=job.job_id,
+                        files=preview_names,
+                        target_chat_id=job.options.target_chat_id,
+                    )
                 )
-            )
-        except Exception:
-            # This is just an informational ping; a failure here (e.g. the
-            # message ended up too long for a huge batch) must never block
-            # the actual file uploads below.
-            logger.exception(
-                "Failed to send result summary for job %s", job.job_id
-            )
+                break
+            except FloodWaitError as e:
+                if attempt == 1:
+                    logger.warning(
+                        "Giving up on result summary after flood wait (%s)",
+                        job.job_id,
+                    )
+                    break
+                await asyncio.sleep(e.seconds + 1)
+            except Exception:
+                # This is just an informational ping; a failure here (e.g.
+                # the message ended up too long for a huge batch) must
+                # never block the actual file uploads below.
+                logger.exception(
+                    "Failed to send result summary for job %s", job.job_id
+                )
+                break
 
         as_video_toggle = job.options.upload_as == "video"
-        as_voice = job.options.quality == "voice"
 
-        is_video_conversion = (
-            job.file_type == "VIDEO"
-            and job.options.quality not in ("mp3", "m4a", "voice")
-        )
+        for entry in job.output_files:
 
-        is_audio_like = (not as_voice) and (
-            job.options.quality in ("mp3", "m4a") or job.file_type == "AUDIO"
-        )
-
-        for output in job.output_files:
+            output = entry.path
 
             force_document = True
+            voice_note = False
             video_attrs = None
             audio_attrs = None
 
-            if as_voice:
+            if entry.kind == "voice":
                 force_document = False
+                voice_note = True
 
-            elif is_video_conversion:
+            elif entry.kind == "video":
                 force_document = not as_video_toggle
                 if not force_document:
                     video_attrs = {
-                        "duration": job.duration,
-                        "width": job.width,
-                        "height": job.height,
+                        "duration": entry.duration,
+                        "width": entry.width,
+                        "height": entry.height,
                     }
 
-            elif is_audio_like:
+            elif entry.kind == "audio":
                 force_document = False
                 audio_attrs = {
-                    "duration": job.duration,
-                    "title": job.options.title,
-                    "performer": job.options.artist,
+                    "duration": entry.duration,
+                    "title": entry.title,
+                    "performer": entry.artist,
                 }
 
             for attempt in range(2):
@@ -168,8 +173,8 @@ async def process_job(payload: dict):
                             target_chat_id=job.options.target_chat_id,
                         ),
                         force_document=force_document,
-                        voice_note=as_voice,
-                        thumb=job.thumbnail,
+                        voice_note=voice_note,
+                        thumb=entry.thumbnail,
                         video_attributes=video_attrs,
                         audio_attributes=audio_attrs,
                     )
@@ -178,8 +183,8 @@ async def process_job(payload: dict):
                 except FloodWaitError as e:
                     if attempt == 1:
                         logger.exception(
-                            "Gave up uploading %s after flood wait ({job.job_id})",
-                            output.name,
+                            "Gave up uploading %s after flood wait (%s)",
+                            output.name, job.job_id,
                         )
                         break
                     logger.warning(
