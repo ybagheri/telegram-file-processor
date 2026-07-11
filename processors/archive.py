@@ -14,6 +14,7 @@ from core.password_broker import password_broker
 from core.protocol import Protocol
 
 from services.telegram import telegram_service
+from utils.text import strip_excluded
 
 logger = get_logger(__name__)
 
@@ -38,6 +39,15 @@ def _natural_key(text: str):
         (0, int(part)) if part.isdigit() else (1, part.lower())
         for part in re.split(r"(\d+)", stem) if part
     ]
+
+
+def _leading_number(name: str):
+    """First run of digits in a filename, used to pair '001.mp3' with
+    '001.pdf' even when their names otherwise differ."""
+
+    match = re.match(r"^\D*(\d+)", Path(name).stem)
+
+    return int(match.group(1)) if match else None
 
 
 class ArchiveProcessor:
@@ -89,6 +99,19 @@ class ArchiveProcessor:
             job.set_status(JobStatus.COMPLETED)
         else:
             job.set_status(JobStatus.FAILED)
+
+        # Lets bot.py know this archive is fully done, so it can build and
+        # send the folder Table Of Contents (if any folders were announced).
+        try:
+            await telegram_service.send_info(
+                Protocol.create_done(
+                    user_id=job.user_id,
+                    job_id=job.job_id,
+                    target_chat_id=job.options.target_chat_id,
+                )
+            )
+        except Exception:
+            logger.exception(f"Failed to send DONE signal ({job.job_id})")
 
         logger.info(f"Archive processing finished ({job.job_id})")
 
@@ -201,17 +224,75 @@ class ArchiveProcessor:
     # Folder-by-folder, ordered processing of extracted files
     # =====================================================
 
+    def _order_folder_files(self, job, files: list[Path]) -> list[Path]:
+        """Groups files the way a human browsing the course would expect:
+        each audio file immediately followed by its matching PDF (same
+        leading number or same cleaned name), then any leftover PDFs,
+        then everything else — each group internally sorted per the
+        user's chosen sort mode/order."""
+
+        from utils.filetype import FileTypeDetector
+
+        reverse = job.options.sort_order == "desc"
+
+        if job.options.sort_mode == "date":
+            key = lambda p: p.stat().st_mtime
+        else:
+            key = lambda p: _natural_key(p.name)
+
+        audio, pdf, other = [], [], []
+
+        for f in files:
+            kind = FileTypeDetector.detect("", f.name)
+            if kind == "AUDIO":
+                audio.append(f)
+            elif kind == "PDF":
+                pdf.append(f)
+            else:
+                other.append(f)
+
+        audio.sort(key=key, reverse=reverse)
+        pdf.sort(key=key, reverse=reverse)
+        other.sort(key=key, reverse=reverse)
+
+        used_pdfs = set()
+        ordered = []
+
+        for a in audio:
+            ordered.append(a)
+
+            a_clean = strip_excluded(a.stem, job.options.exclude_text).lower()
+            a_num = _leading_number(a.name)
+
+            match = None
+            for p in pdf:
+                if p in used_pdfs:
+                    continue
+                p_clean = strip_excluded(p.stem, job.options.exclude_text).lower()
+                if p_clean == a_clean or (a_num is not None and _leading_number(p.name) == a_num):
+                    match = p
+                    break
+
+            if match:
+                ordered.append(match)
+                used_pdfs.add(match)
+
+        ordered.extend(p for p in pdf if p not in used_pdfs)
+        ordered.extend(other)
+
+        return ordered
+
     async def _walk_and_process(self, job):
 
         # Imported lazily to avoid a circular import
         # (dispatcher imports this module at module load time).
         from dispatcher.dispatcher import Dispatcher
-        from utils.filetype import FileTypeDetector
 
         dispatcher = Dispatcher()
 
+        from utils.filetype import FileTypeDetector
+
         reverse = job.options.sort_order == "desc"
-        sort_by_date = job.options.sort_mode == "date"
 
         original_input = job.input_file
         original_type = job.file_type
@@ -234,20 +315,12 @@ class ArchiveProcessor:
                 if relative_str:
                     await self._announce_folder(job, relative_str)
 
-                if sort_by_date:
-                    files = sorted(
-                        (root / name for name in filenames),
-                        key=lambda p: p.stat().st_mtime,
-                        reverse=reverse,
-                    )
-                else:
-                    files = sorted(
-                        (root / name for name in filenames),
-                        key=lambda p: _natural_key(p.name),
-                        reverse=reverse,
-                    )
-
                 job.current_extract_folder = relative_str
+
+                files = self._order_folder_files(
+                    job,
+                    [root / name for name in filenames],
+                )
 
                 for extracted in files:
 
@@ -256,7 +329,7 @@ class ArchiveProcessor:
                     file_type = FileTypeDetector.detect("", extracted.name)
 
                     job.input_file = extracted
-                    job.original_name = extracted.name
+                    job.original_name = strip_excluded(extracted.name, job.options.exclude_text)
 
                     if file_type == "UNKNOWN":
                         job.add_output(extracted, kind="document")
@@ -281,10 +354,10 @@ class ArchiveProcessor:
 
     async def _announce_folder(self, job, relative_str: str):
 
-        payload = Protocol.create_info(
+        payload = Protocol.create_folder(
             user_id=job.user_id,
             job_id=job.job_id,
-            message=f"📂 {relative_str}",
+            folder=relative_str,
             target_chat_id=job.options.target_chat_id,
         )
 

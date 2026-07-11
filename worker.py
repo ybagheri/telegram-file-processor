@@ -13,6 +13,7 @@ from core.protocol import Protocol
 from dispatcher.dispatcher import Dispatcher
 from services.telegram import telegram_service
 from utils.filetype import FileTypeDetector
+from utils.text import strip_excluded
 
 logger = get_logger(__name__)
 
@@ -57,7 +58,7 @@ async def process_job(payload: dict):
         mime_type = message.file.mime_type or ""
         job.file_size = message.file.size or 0
 
-    job.original_name = filename
+    job.original_name = strip_excluded(filename, job.options.exclude_text)
     job.mime_type = mime_type
 
     job.file_type = FileTypeDetector.detect(

@@ -7,6 +7,8 @@ class MessageType(str, Enum):
     PASSWORD_RESPONSE = "password_response"
     ERROR = "error"
     INFO = "info"
+    FOLDER = "folder"     # archive folder announcement (tracked for the TOC)
+    DONE = "done"         # job finished -> bot.py may now send the TOC
 
 
 class JobStatus(str, Enum):

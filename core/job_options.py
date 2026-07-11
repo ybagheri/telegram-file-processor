@@ -54,6 +54,11 @@ class JobOptions:
 
     sort_order: str = "asc"    # "asc" | "desc"
 
+    # Text/substring to strip out of every filename (and anything derived
+    # from it: title, caption, etc.) before it's used anywhere — e.g. to
+    # remove an ad/watermark string like "[www.site.com]".
+    exclude_text: str = ""
+
     # ==========================================
     # Rename
     # ==========================================

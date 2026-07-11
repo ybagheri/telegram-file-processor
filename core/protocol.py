@@ -130,3 +130,35 @@ class Protocol:
             "message": message,
             "target_chat_id": target_chat_id,
         }
+
+    @staticmethod
+    def create_folder(
+        *,
+        user_id: int,
+        job_id: str,
+        folder: str,
+        target_chat_id: int = 0,
+    ) -> dict:
+
+        return {
+            "type": MessageType.FOLDER,
+            "user_id": user_id,
+            "job_id": job_id,
+            "folder": folder,
+            "target_chat_id": target_chat_id,
+        }
+
+    @staticmethod
+    def create_done(
+        *,
+        user_id: int,
+        job_id: str,
+        target_chat_id: int = 0,
+    ) -> dict:
+
+        return {
+            "type": MessageType.DONE,
+            "user_id": user_id,
+            "job_id": job_id,
+            "target_chat_id": target_chat_id,
+        }

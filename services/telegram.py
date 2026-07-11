@@ -162,10 +162,13 @@ class TelegramService:
         self,
         chat_id: int,
         text: str,
+        *,
+        parse_mode: str | None = None,
     ):
-        await self.bot.send_message(
+        return await self.bot.send_message(
             chat_id,
             text,
+            parse_mode=parse_mode,
         )
 
     async def copy_message_to(

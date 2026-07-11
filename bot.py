@@ -1,5 +1,6 @@
 import asyncio
 from dataclasses import dataclass, field
+from html import escape as html_escape
 from uuid import uuid4
 
 from aiogram import Dispatcher as AiogramDispatcher, F
@@ -74,6 +75,10 @@ class PendingFile:
 # In-memory state. Fine for a single-process bot; cleared on restart.
 pending_files: dict[str, PendingFile] = {}
 awaiting_state: dict[int, str] = {}  # user_id -> state tag
+
+# job_id -> [(folder_name, message_id_in_destination_chat), ...], used to
+# build a linked Table Of Contents once an archive job finishes.
+job_folder_links: dict[str, list[tuple[str, int]]] = {}
 
 
 # ======================================================================
@@ -152,6 +157,7 @@ def settings_text_and_keyboard(user_id: int) -> dict:
         f"📝 کپشن پیش‌فرض مدیاها: {s['media_caption'] or '— (بدون کپشن)'}\n"
         f"🔤 ترتیب فایل‌های آرشیو: {'بر اساس تاریخ' if s['sort_mode'] == 'date' else 'بر اساس نام'} "
         f"({'نزولی' if s['sort_order'] == 'desc' else 'صعودی'})\n"
+        f"🧹 متن حذفی از نام فایل‌ها: {s['exclude_text'] or '— (خالی)'}\n"
     )
 
     kb = InlineKeyboardMarkup(inline_keyboard=[
@@ -177,6 +183,7 @@ def settings_text_and_keyboard(user_id: int) -> dict:
             text=f"↕️ جهت: {'نزولی' if s['sort_order'] == 'desc' else 'صعودی'} کن",
             callback_data="s:sortorder",
         )],
+        [InlineKeyboardButton(text="🧹 تغییر متن حذفی (Exclude)", callback_data="s:exclude")],
     ])
 
     return {"text": text, "reply_markup": kb}
@@ -257,6 +264,17 @@ async def settings_sort_order(callback: CallbackQuery):
     await settings_store.update(callback.from_user.id, sort_order=new_val)
     await callback.message.edit_text(**settings_text_and_keyboard(callback.from_user.id))
     await callback.answer("بروزرسانی شد")
+
+
+@dp.callback_query(F.data == "s:exclude")
+async def settings_exclude(callback: CallbackQuery):
+    awaiting_state[callback.from_user.id] = "settings_exclude"
+    await callback.message.answer(
+        "متنی که می‌خواهید از نام همه‌ی فایل‌ها حذف شود را بفرستید "
+        "(مثلاً یک تبلیغ یا واترمارک متنی مثل «[www.site.com]»).\n"
+        "برای غیرفعال کردن این قابلیت، کلمه‌ی «حذف» را بفرستید."
+    )
+    await callback.answer()
 
 
 @dp.callback_query(F.data == "s:artist")
@@ -446,6 +464,21 @@ async def finalize_job(callback: CallbackQuery, pending: PendingFile, pid: str):
 # Awaited free-text / photo / forward input
 # ======================================================================
 
+async def _resolve_message_link(chat_id: int, message_id: int) -> str:
+
+    try:
+        chat = await bot.get_chat(chat_id)
+        if getattr(chat, "username", None):
+            return f"https://t.me/{chat.username}/{message_id}"
+    except Exception:
+        pass
+
+    internal = str(chat_id)
+    internal = internal[4:] if internal.startswith("-100") else internal.lstrip("-")
+
+    return f"https://t.me/c/{internal}/{message_id}"
+
+
 async def _resolve_target(message: Message):
     if message.forward_from_chat:
         chat = message.forward_from_chat
@@ -504,6 +537,15 @@ async def handle_awaited_input(message: Message, state: str) -> bool:
             return False
         new_caption = "" if message.text.strip() in ("حذف", "-", "none", "None") else message.text
         await settings_store.update(user_id, media_caption=new_caption)
+        awaiting_state.pop(user_id, None)
+        await message.answer(**settings_text_and_keyboard(user_id))
+        return True
+
+    if state == "settings_exclude":
+        if not message.text:
+            return False
+        new_value = "" if message.text.strip() in ("حذف", "-", "none", "None") else message.text.strip()
+        await settings_store.update(user_id, exclude_text=new_value)
         awaiting_state.pop(user_id, None)
         await message.answer(**settings_text_and_keyboard(user_id))
         return True
@@ -645,6 +687,7 @@ async def handle_private_message(message: Message):
             "custom_thumbnail": "",
             "sort_mode": defaults["sort_mode"],
             "sort_order": defaults["sort_order"],
+            "exclude_text": defaults["exclude_text"],
         },
     )
 
@@ -733,6 +776,45 @@ async def handle_bridge_message(message: Message):
             destination,
             payload.get("message", ""),
         )
+
+        return
+
+    if message_type == MessageType.FOLDER.value:
+
+        job_id = payload.get("job_id")
+        folder = payload.get("folder", "")
+
+        sent = await telegram_service.send_text(destination, f"📂 {folder}")
+
+        if sent is not None:
+            job_folder_links.setdefault(job_id, []).append((folder, sent.message_id))
+
+        return
+
+    if message_type == MessageType.DONE.value:
+
+        job_id = payload.get("job_id")
+        folders = job_folder_links.pop(job_id, None)
+
+        # A TOC with clickable links only makes sense when the files were
+        # delivered to a channel/group the user can link back into —
+        # there's no public link for a private 1:1 chat with the bot.
+        if folders and destination != user_id:
+
+            lines = ["📑 <b>فهرست مطالب</b>\n"]
+
+            for name, message_id in folders:
+                url = await _resolve_message_link(destination, message_id)
+                lines.append(f'📂 <a href="{url}">{html_escape(name)}</a>')
+
+            try:
+                await telegram_service.send_text(
+                    destination,
+                    "\n".join(lines),
+                    parse_mode="HTML",
+                )
+            except Exception:
+                logger.exception("Failed to send TOC for job %s", job_id)
 
         return
 
