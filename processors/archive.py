@@ -100,19 +100,6 @@ class ArchiveProcessor:
         else:
             job.set_status(JobStatus.FAILED)
 
-        # Lets bot.py know this archive is fully done, so it can build and
-        # send the folder Table Of Contents (if any folders were announced).
-        try:
-            await telegram_service.send_info(
-                Protocol.create_done(
-                    user_id=job.user_id,
-                    job_id=job.job_id,
-                    target_chat_id=job.options.target_chat_id,
-                )
-            )
-        except Exception:
-            logger.exception(f"Failed to send DONE signal ({job.job_id})")
-
         logger.info(f"Archive processing finished ({job.job_id})")
 
         return job.has_output

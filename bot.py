@@ -1,6 +1,7 @@
 import asyncio
 from dataclasses import dataclass, field
 from html import escape as html_escape
+from pathlib import Path
 from uuid import uuid4
 
 from aiogram import Dispatcher as AiogramDispatcher, F
@@ -734,9 +735,16 @@ async def handle_bridge_message(message: Message):
 
             # copyMessage keeps the ORIGINAL caption when caption is not
             # given at all, so we must always pass an explicit string here
-            # (empty by default) — otherwise the raw protocol JSON caption
-            # used for the bridge would leak straight through to the user.
-            user_caption = settings_store.get(user_id).get("media_caption") or ""
+            # — otherwise the raw protocol JSON caption used for the
+            # bridge would leak straight through to the user.
+            files = payload.get("files") or []
+            file_name = files[0] if files else ""
+            name_without_ext = Path(file_name).stem if file_name else ""
+
+            custom_caption = settings_store.get(user_id).get("media_caption") or ""
+
+            caption_parts = [p for p in (name_without_ext, custom_caption) if p]
+            user_caption = "\n\n".join(caption_parts)
 
             await telegram_service.copy_message_to(
                 chat_id=destination,
@@ -815,6 +823,14 @@ async def handle_bridge_message(message: Message):
                 )
             except Exception:
                 logger.exception("Failed to send TOC for job %s", job_id)
+
+        try:
+            await telegram_service.send_text(
+                user_id,
+                "✅ همه‌ی فایل‌ها با موفقیت ارسال شدند.",
+            )
+        except Exception:
+            logger.exception("Failed to send completion notice for job %s", job_id)
 
         return
 

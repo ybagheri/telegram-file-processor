@@ -208,6 +208,19 @@ async def process_job(payload: dict):
             if len(job.output_files) > 5:
                 await asyncio.sleep(0.5)
 
+        try:
+            await telegram_service.send_info(
+                Protocol.create_done(
+                    user_id=job.user_id,
+                    job_id=job.job_id,
+                    target_chat_id=job.options.target_chat_id,
+                )
+            )
+        except Exception:
+            logger.exception(
+                "Failed to send completion notice for job %s", job.job_id
+            )
+
     if not success or not job.has_output:
 
         await telegram_service.send_error(
