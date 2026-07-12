@@ -5,6 +5,7 @@ from pathlib import Path
 from config import Metadata
 from core.constants import JobStatus
 from core.logger import get_logger
+from core.registry import register_processor
 
 from services.media import media_service
 from services.tags import tag_service
@@ -12,6 +13,7 @@ from services.tags import tag_service
 logger = get_logger(__name__)
 
 
+@register_processor("AUDIO")
 class AudioProcessor:
 
     async def process(self, job):

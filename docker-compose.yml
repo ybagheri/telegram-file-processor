@@ -1,0 +1,23 @@
+services:
+  bot:
+    build: .
+    command: python bot.py
+    env_file: .env
+    volumes:
+      - ./downloads:/app/downloads
+      - ./config_data:/app/config_data
+      - ./logs:/app/logs
+      - ./logo:/app/logo
+    restart: unless-stopped
+
+  worker:
+    build: .
+    command: python worker.py
+    env_file: .env
+    volumes:
+      - ./downloads:/app/downloads
+      - ./config_data:/app/config_data
+      - ./logs:/app/logs
+      - ./sessions:/app/sessions
+      - ./logo:/app/logo
+    restart: unless-stopped

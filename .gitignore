@@ -24,25 +24,27 @@ virtualenv/
 # ====================
 # Project Data
 # ====================
-config_data/
 downloads/
 outputs/
 logs/
 sessions/
 temp/
 logo/
+cache/
+config_data/
 *.log
 
 # ====================
 # Debug & Test Files
+# (leading slash: only matches these at the repo root — NOT tests/test_*.py)
 # ====================
-bot_debug.py
-check_ids.py
-check_membership.py
-find_group.py
-get_group_id.py
-login.py
-test_*.py
+/bot_debug.py
+/check_ids.py
+/check_membership.py
+/find_group.py
+/get_group_id.py
+/login.py
+/test_*.py
 
 # ====================
 # IDE & Editor

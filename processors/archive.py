@@ -12,6 +12,7 @@ from core.constants import JobStatus
 from core.logger import get_logger
 from core.password_broker import password_broker
 from core.protocol import Protocol
+from core.registry import register_processor
 
 from services.telegram import telegram_service
 from utils.text import strip_excluded
@@ -50,6 +51,7 @@ def _leading_number(name: str):
     return int(match.group(1)) if match else None
 
 
+@register_processor("ARCHIVE")
 class ArchiveProcessor:
 
     async def process(self, job):

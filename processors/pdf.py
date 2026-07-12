@@ -2,6 +2,7 @@ from __future__ import annotations
 
 from core.constants import JobStatus
 from core.logger import get_logger
+from core.registry import register_processor
 
 from services.media import media_service
 
@@ -10,6 +11,7 @@ logger = get_logger(__name__)
 COMPRESS_THRESHOLD_MB = 50
 
 
+@register_processor("PDF")
 class PDFProcessor:
 
     async def process(self, job):
