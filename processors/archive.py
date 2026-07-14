@@ -3,6 +3,7 @@ from __future__ import annotations
 import asyncio
 import os
 import re
+import time
 import zipfile
 from pathlib import Path
 
@@ -20,6 +21,18 @@ from utils.text import strip_excluded
 logger = get_logger(__name__)
 
 PASSWORD_TIMEOUT_SECONDS = 300
+
+# .zip and .rar support true random-access extraction (one member at a
+# time, without touching the rest of the archive), so we stream: extract
+# one file -> process it -> delete the raw extracted copy -> next. This
+# keeps peak disk usage to roughly "the archive itself + one file", instead
+# of "the archive + the entire extracted tree" at once.
+#
+# .7z almost always uses solid compression by default, where files are
+# compressed together in blocks and can't be read out individually without
+# decompressing everything before them in the same block anyway — so for
+# .7z we still extract everything up front, same as before.
+STREAMABLE_SUFFIXES = {".zip", ".rar"}
 
 
 class _PasswordRequired(Exception):
@@ -66,36 +79,27 @@ class ArchiveProcessor:
         suffix = job.input_file.suffix.lower()
         password = job.options.password or None
 
-        loop = asyncio.get_event_loop()
+        if suffix in STREAMABLE_SUFFIXES:
 
-        # Try to extract; if a password is required (or the given one is
-        # wrong), ask the user through the bridge and retry once.
-        for attempt in range(2):
+            password = await self._prepare_streaming(job, suffix, password)
 
-            try:
-                await loop.run_in_executor(
-                    None,
-                    self._extract,
-                    job.input_file,
-                    job.extracted_dir,
-                    suffix,
-                    password,
-                )
-                break
+            entries = await self._list_entries(job.input_file, suffix)
 
-            except (_PasswordRequired, _WrongPassword):
+            if not entries:
+                job.set_status(JobStatus.FAILED)
+                raise ValueError("Archive contained no files")
 
-                if attempt == 1:
-                    job.set_status(JobStatus.FAILED)
-                    raise ValueError("Correct password was not provided")
+            await self._stream_and_process(job, suffix, password, entries)
 
-                password = await self._request_password(job)
+        else:
 
-        if not job.extracted_dir.exists() or not any(job.extracted_dir.iterdir()):
-            job.set_status(JobStatus.FAILED)
-            raise ValueError("Archive contained no files")
+            password = await self._prepare_bulk(job, suffix, password)
 
-        await self._walk_and_process(job)
+            if not job.extracted_dir.exists() or not any(job.extracted_dir.iterdir()):
+                job.set_status(JobStatus.FAILED)
+                raise ValueError("Archive contained no files")
+
+            await self._walk_disk_and_process(job)
 
         if job.has_output:
             job.set_status(JobStatus.COMPLETED)
@@ -128,63 +132,66 @@ class ArchiveProcessor:
             password_broker.cancel(job.job_id)
             raise ValueError("Timed out waiting for the archive password")
 
+    async def _prepare_bulk(self, job, suffix, password) -> str | None:
+
+        loop = asyncio.get_event_loop()
+
+        for attempt in range(2):
+
+            try:
+                await loop.run_in_executor(
+                    None,
+                    self._extract_bulk,
+                    job.input_file,
+                    job.extracted_dir,
+                    suffix,
+                    password,
+                )
+                return password
+
+            except (_PasswordRequired, _WrongPassword):
+
+                if attempt == 1:
+                    job.set_status(JobStatus.FAILED)
+                    raise ValueError("Correct password was not provided")
+
+                password = await self._request_password(job)
+
+        return password
+
+    async def _prepare_streaming(self, job, suffix, password) -> str | None:
+
+        loop = asyncio.get_event_loop()
+
+        for attempt in range(2):
+
+            try:
+                await loop.run_in_executor(
+                    None,
+                    self._validate_password_sync,
+                    job.input_file,
+                    suffix,
+                    password,
+                )
+                return password
+
+            except (_PasswordRequired, _WrongPassword):
+
+                if attempt == 1:
+                    job.set_status(JobStatus.FAILED)
+                    raise ValueError("Correct password was not provided")
+
+                password = await self._request_password(job)
+
+        return password
+
     # =====================================================
-    # Extraction (blocking, runs in a thread pool executor)
+    # Bulk extraction (7z only — see STREAMABLE_SUFFIXES note above)
     # =====================================================
 
-    def _extract(self, input_file, destination, suffix, password):
+    def _extract_bulk(self, input_file, destination, suffix, password):
 
         destination.mkdir(parents=True, exist_ok=True)
-
-        if suffix == ".zip":
-            self._extract_zip(input_file, destination, password)
-
-        elif suffix == ".rar":
-            self._extract_rar(input_file, destination, password)
-
-        elif suffix == ".7z":
-            self._extract_7z(input_file, destination, password)
-
-        else:
-            raise ValueError(f"Unsupported archive format: {suffix}")
-
-    def _extract_zip(self, input_file, destination, password):
-
-        with zipfile.ZipFile(input_file) as archive:
-
-            needs_password = any(
-                info.flag_bits & 0x1 for info in archive.infolist()
-            )
-
-            if needs_password and not password:
-                raise _PasswordRequired()
-
-            pwd_bytes = password.encode() if password else None
-
-            try:
-                archive.extractall(destination, pwd=pwd_bytes)
-            except RuntimeError as e:
-                if "password" in str(e).lower():
-                    raise _WrongPassword()
-                raise
-
-    def _extract_rar(self, input_file, destination, password):
-
-        import rarfile
-
-        with rarfile.RarFile(input_file) as archive:
-
-            if archive.needs_password() and not password:
-                raise _PasswordRequired()
-
-            try:
-                archive.extractall(destination, pwd=password)
-            except rarfile.RarWrongPassword:
-                raise _WrongPassword()
-            except rarfile.PasswordRequired:
-                raise _PasswordRequired()
-
-    def _extract_7z(self, input_file, destination, password):
 
         import py7zr
 
@@ -210,78 +217,216 @@ class ArchiveProcessor:
             raise
 
     # =====================================================
-    # Folder-by-folder, ordered processing of extracted files
+    # Streaming extraction (zip / rar): list without extracting, validate
+    # the password against one entry in memory, then extract one member
+    # at a time on demand.
     # =====================================================
 
-    def _order_folder_files(self, job, files: list[Path]) -> list[Path]:
-        """Groups files the way a human browsing the course would expect:
-        each audio file immediately followed by its matching PDF (same
-        leading number or same cleaned name), then any leftover PDFs,
-        then everything else — each group internally sorted per the
-        user's chosen sort mode/order."""
+    def _validate_password_sync(self, input_file, suffix, password):
+
+        if suffix == ".zip":
+
+            with zipfile.ZipFile(input_file) as archive:
+
+                infos = archive.infolist()
+                needs_password = any(info.flag_bits & 0x1 for info in infos)
+
+                if needs_password and not password:
+                    raise _PasswordRequired()
+
+                if needs_password:
+                    first_file = next((i for i in infos if not i.is_dir()), None)
+                    if first_file:
+                        try:
+                            archive.read(first_file.filename, pwd=password.encode())
+                        except RuntimeError as e:
+                            if "password" in str(e).lower():
+                                raise _WrongPassword()
+                            raise
+
+        elif suffix == ".rar":
+
+            import rarfile
+
+            with rarfile.RarFile(input_file) as archive:
+
+                needs_password = archive.needs_password()
+
+                if needs_password and not password:
+                    raise _PasswordRequired()
+
+                if needs_password:
+                    infos = archive.infolist()
+                    first_file = next((i for i in infos if not i.isdir()), None)
+                    if first_file:
+                        try:
+                            archive.read(first_file.filename, pwd=password)
+                        except rarfile.RarWrongPassword:
+                            raise _WrongPassword()
+                        except rarfile.PasswordRequired:
+                            raise _PasswordRequired()
+
+    async def _list_entries(self, input_file, suffix) -> list[tuple[str, float]]:
+
+        loop = asyncio.get_event_loop()
+
+        return await loop.run_in_executor(
+            None, self._list_entries_sync, input_file, suffix,
+        )
+
+    def _list_entries_sync(self, input_file, suffix) -> list[tuple[str, float]]:
+
+        entries = []
+
+        if suffix == ".zip":
+
+            with zipfile.ZipFile(input_file) as archive:
+                for info in archive.infolist():
+                    if info.is_dir():
+                        continue
+                    mtime = time.mktime((*info.date_time, 0, 0, -1))
+                    entries.append((info.filename.replace("\\", "/"), mtime))
+
+        elif suffix == ".rar":
+
+            import rarfile
+
+            with rarfile.RarFile(input_file) as archive:
+                for info in archive.infolist():
+                    if info.isdir():
+                        continue
+                    mtime = time.mktime((*info.date_time, 0, 0, -1))
+                    entries.append((info.filename.replace("\\", "/"), mtime))
+
+        return entries
+
+    def _extract_single_sync(self, input_file, destination_root, suffix, password, rel_path) -> str:
+
+        try:
+            if suffix == ".zip":
+                with zipfile.ZipFile(input_file) as archive:
+                    pwd_bytes = password.encode() if password else None
+                    return archive.extract(rel_path, path=str(destination_root), pwd=pwd_bytes)
+
+            if suffix == ".rar":
+                import rarfile
+                with rarfile.RarFile(input_file) as archive:
+                    return archive.extract(rel_path, path=str(destination_root), pwd=password)
+
+            raise ValueError(f"Unsupported streaming format: {suffix}")
+
+        except RuntimeError as e:
+            if "password" in str(e).lower():
+                raise _WrongPassword()
+            raise
+
+        except Exception as e:
+            try:
+                import rarfile
+                if isinstance(e, rarfile.RarWrongPassword):
+                    raise _WrongPassword()
+                if isinstance(e, rarfile.PasswordRequired):
+                    raise _PasswordRequired()
+            except ImportError:
+                pass
+            raise
+
+    async def _extract_single(self, input_file, destination_root, suffix, password, rel_path) -> Path:
+
+        loop = asyncio.get_event_loop()
+
+        result = await loop.run_in_executor(
+            None,
+            self._extract_single_sync,
+            input_file,
+            destination_root,
+            suffix,
+            password,
+            rel_path,
+        )
+
+        return Path(result)
+
+    # =====================================================
+    # Shared ordering logic (audio/PDF pairing + sort) — works on any
+    # "item" as long as you can get a display name and an mtime from it.
+    # =====================================================
+
+    def _order_items(self, job, items, name_of, mtime_of):
 
         from utils.filetype import FileTypeDetector
 
         reverse = job.options.sort_order == "desc"
 
-        if job.options.sort_mode == "date":
-            key = lambda p: p.stat().st_mtime
-        else:
-            key = lambda p: _natural_key(p.name)
+        key = mtime_of if job.options.sort_mode == "date" else (lambda it: _natural_key(name_of(it)))
 
         audio, pdf, other = [], [], []
 
-        for f in files:
-            kind = FileTypeDetector.detect("", f.name)
+        for it in items:
+            kind = FileTypeDetector.detect("", name_of(it))
             if kind == "AUDIO":
-                audio.append(f)
+                audio.append(it)
             elif kind == "PDF":
-                pdf.append(f)
+                pdf.append(it)
             else:
-                other.append(f)
+                other.append(it)
 
         audio.sort(key=key, reverse=reverse)
         pdf.sort(key=key, reverse=reverse)
         other.sort(key=key, reverse=reverse)
 
-        used_pdfs = set()
+        used = set()
         ordered = []
 
         for a in audio:
             ordered.append(a)
 
-            a_clean = strip_excluded(a.stem, job.options.exclude_text).lower()
-            a_num = _leading_number(a.name)
+            a_name = name_of(a)
+            a_clean = strip_excluded(Path(a_name).stem, job.options.exclude_text).lower()
+            a_num = _leading_number(a_name)
 
             match = None
             for p in pdf:
-                if p in used_pdfs:
+                if p in used:
                     continue
-                p_clean = strip_excluded(p.stem, job.options.exclude_text).lower()
-                if p_clean == a_clean or (a_num is not None and _leading_number(p.name) == a_num):
+                p_name = name_of(p)
+                p_clean = strip_excluded(Path(p_name).stem, job.options.exclude_text).lower()
+                if p_clean == a_clean or (a_num is not None and _leading_number(p_name) == a_num):
                     match = p
                     break
 
-            if match:
+            if match is not None:
                 ordered.append(match)
-                used_pdfs.add(match)
+                used.add(match)
 
-        ordered.extend(p for p in pdf if p not in used_pdfs)
+        ordered.extend(p for p in pdf if p not in used)
         ordered.extend(other)
 
         return ordered
 
-    async def _walk_and_process(self, job):
+    # =====================================================
+    # Streaming walk (zip / rar): builds the folder tree purely from the
+    # listing (no disk extraction needed just to see the structure), then
+    # extracts + processes one file at a time.
+    # =====================================================
 
-        # Imported lazily to avoid a circular import
-        # (dispatcher imports this module at module load time).
+    async def _stream_and_process(self, job, suffix, password, entries):
+
         from dispatcher.dispatcher import Dispatcher
+        from utils.filetype import FileTypeDetector
 
         dispatcher = Dispatcher()
 
-        from utils.filetype import FileTypeDetector
+        tree = {"__files__": [], "__children__": {}}
 
-        reverse = job.options.sort_order == "desc"
+        for rel_path, mtime in entries:
+            parts = rel_path.split("/")
+            node = tree
+            for part in parts[:-1]:
+                node = node["__children__"].setdefault(
+                    part, {"__files__": [], "__children__": {}},
+                )
+            node["__files__"].append((rel_path, mtime))
 
         original_input = job.input_file
         original_type = job.file_type
@@ -290,6 +435,113 @@ class ArchiveProcessor:
 
         # A rename only makes sense for a single file; for a whole archive
         # it would collapse every extracted file onto the same output name.
+        job.options.rename_to = ""
+
+        try:
+            await self._stream_node(
+                job, tree, "", suffix, password, dispatcher, FileTypeDetector, original_input,
+            )
+        finally:
+            job.input_file = original_input
+            job.file_type = original_type
+            job.original_name = original_name
+            job.options.rename_to = original_rename
+            job.current_extract_folder = ""
+
+    async def _stream_node(self, job, node, relative_folder, suffix, password, dispatcher, FileTypeDetector, archive_path):
+
+        if relative_folder:
+            await self._announce_folder(job, relative_folder)
+
+        job.current_extract_folder = relative_folder
+
+        ordered_files = self._order_items(
+            job,
+            node["__files__"],
+            name_of=lambda it: Path(it[0]).name,
+            mtime_of=lambda it: it[1],
+        )
+
+        for rel_path, _mtime in ordered_files:
+
+            try:
+                extracted_path = await self._extract_single(
+                    archive_path, job.extracted_dir, suffix, password, rel_path,
+                )
+            except Exception:
+                logger.exception(
+                    f"Failed to extract {rel_path} ({job.job_id})"
+                )
+                continue
+
+            file_type = FileTypeDetector.detect("", extracted_path.name)
+
+            job.input_file = extracted_path
+            job.original_name = strip_excluded(extracted_path.name, job.options.exclude_text)
+
+            if file_type == "UNKNOWN":
+                # This raw extracted file IS the output — keep it on disk
+                # until it's uploaded (worker.py deletes it after upload).
+                job.add_output(extracted_path, kind="document")
+                continue
+
+            job.file_type = file_type
+
+            try:
+                await dispatcher.dispatch(job)
+            except Exception:
+                logger.exception(
+                    f"Failed to process extracted file {rel_path} ({job.job_id})"
+                )
+
+            # The processor (video/audio/pdf/archive) writes its own output
+            # file elsewhere under output_dir — the raw extracted copy here
+            # is no longer needed, so free it immediately rather than
+            # waiting for the whole job to finish.
+            if extracted_path.exists():
+                try:
+                    extracted_path.unlink()
+                except OSError:
+                    pass
+
+        reverse = job.options.sort_order == "desc"
+        child_names = sorted(node["__children__"].keys(), key=_natural_key, reverse=reverse)
+
+        for child_name in child_names:
+            child_relative = f"{relative_folder}/{child_name}" if relative_folder else child_name
+            await self._stream_node(
+                job, node["__children__"][child_name], child_relative,
+                suffix, password, dispatcher, FileTypeDetector, archive_path,
+            )
+
+    # =====================================================
+    # Disk-based walk (7z only): same ordering/pairing rules, but the
+    # whole archive is already extracted to job.extracted_dir up front.
+    # =====================================================
+
+    def _order_folder_files(self, job, files: list[Path]) -> list[Path]:
+
+        return self._order_items(
+            job,
+            files,
+            name_of=lambda p: p.name,
+            mtime_of=lambda p: p.stat().st_mtime,
+        )
+
+    async def _walk_disk_and_process(self, job):
+
+        from dispatcher.dispatcher import Dispatcher
+        from utils.filetype import FileTypeDetector
+
+        dispatcher = Dispatcher()
+
+        reverse = job.options.sort_order == "desc"
+
+        original_input = job.input_file
+        original_type = job.file_type
+        original_name = job.original_name
+        original_rename = job.options.rename_to
+
         job.options.rename_to = ""
 
         try:

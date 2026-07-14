@@ -203,6 +203,17 @@ async def process_job(payload: dict):
                     )
                     break
 
+            # Free disk as we go: once a file has been uploaded (or we've
+            # given up on it after retries), there's no reason to keep it
+            # around until the whole job finishes — this matters a lot for
+            # archives that produce many/large outputs.
+            for path in (output, entry.thumbnail):
+                if path and path.exists():
+                    try:
+                        path.unlink()
+                    except OSError:
+                        pass
+
             # Small pacing delay to avoid tripping flood limits on jobs
             # that unpack into dozens/hundreds of files (e.g. archives).
             if len(job.output_files) > 5:
