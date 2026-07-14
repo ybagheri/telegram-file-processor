@@ -159,9 +159,11 @@ class ArchiveProcessor:
 
         return password
 
-    async def _prepare_streaming(self, job, suffix, password) -> str | None:
+    async def _prepare_streaming(self, job, suffix, password, archive_path=None) -> str | None:
 
         loop = asyncio.get_event_loop()
+
+        path_to_check = archive_path if archive_path is not None else job.input_file
 
         for attempt in range(2):
 
@@ -169,7 +171,7 @@ class ArchiveProcessor:
                 await loop.run_in_executor(
                     None,
                     self._validate_password_sync,
-                    job.input_file,
+                    path_to_check,
                     suffix,
                     password,
                 )
@@ -592,6 +594,274 @@ class ArchiveProcessor:
             job.original_name = original_name
             job.options.rename_to = original_rename
             job.current_extract_folder = ""
+
+    # =====================================================
+    # Multi-volume RAR (user-declared: they send each part as a separate
+    # message because the whole archive is too big for local disk at
+    # once). We keep volume 1 (needed to open/list the archive) plus a
+    # sliding window of the most recent volumes, sized from the *real*
+    # per-file compressed sizes in the listing — never guessed — so we
+    # never risk deleting a volume a pending file still needs.
+    # =====================================================
+
+    def _sort_parts(self, messages):
+
+        def key(message):
+            name = (message.file.name if message.file else "") or ""
+
+            match = re.search(r"\.part(\d+)", name, re.IGNORECASE)
+            if match:
+                return int(match.group(1))
+
+            match = re.search(r"\.r(\d{2,})$", name, re.IGNORECASE)
+            if match:
+                return int(match.group(1)) + 1
+
+            return 0  # unrecognized naming: keep as sent (stable sort)
+
+        return sorted(messages, key=key)
+
+    async def _download_volume(self, job, message, index: int) -> Path | None:
+
+        filename = (message.file.name if message.file else None) or f"part{index}.rar"
+
+        destination = job.input_dir / filename
+
+        return await telegram_service.download(message, destination)
+
+    def _list_rar_entries_with_size_sync(self, input_file) -> list[tuple[str, float, int]]:
+
+        import rarfile
+
+        entries = []
+
+        with rarfile.RarFile(input_file) as archive:
+            for info in archive.infolist():
+                if info.isdir():
+                    continue
+                mtime = time.mktime((*info.date_time, 0, 0, -1))
+                entries.append((
+                    info.filename.replace("\\", "/"),
+                    mtime,
+                    info.compress_size,
+                ))
+
+        return entries
+
+    def _compute_keep_window(self, volume_size: int, entries) -> int:
+
+        if volume_size <= 0:
+            return 3  # can't compute safely; fall back to a cautious default
+
+        import math
+
+        max_span = 1
+
+        for _rel_path, _mtime, compress_size in entries:
+            span = math.ceil((compress_size or 0) / volume_size) + 1
+            max_span = max(max_span, span)
+
+        return max(2, max_span)
+
+    async def _fetch_next_volume(self, job, state):
+
+        idx = state["next_to_fetch"]
+
+        if idx > state["total_parts"]:
+            raise ValueError("No more parts left to fetch")
+
+        message = state["parts"][idx - 1]
+
+        path = await self._download_volume(job, message, idx)
+
+        if path is None:
+            raise ValueError(f"Failed to download part {idx}")
+
+        state["volumes"][idx] = path
+        state["next_to_fetch"] = idx + 1
+
+        # Keep volume 1 forever (it's the entry point for opening/listing
+        # the set) plus a sliding window of the most recent other volumes.
+        non_first = sorted(k for k in state["volumes"].keys() if k != 1)
+
+        while len(non_first) > state["keep_window"]:
+            oldest = non_first.pop(0)
+            old_path = state["volumes"].pop(oldest)
+            if old_path.exists():
+                try:
+                    old_path.unlink()
+                except OSError:
+                    pass
+
+    async def _extract_with_more_volumes(self, job, state, rel_path) -> Path | None:
+
+        while True:
+
+            try:
+                return await self._extract_single(
+                    state["volumes"][1], job.extracted_dir, ".rar", state["password"], rel_path,
+                )
+
+            except Exception:
+
+                if state["next_to_fetch"] > state["total_parts"]:
+                    logger.exception(
+                        f"Extraction failed for {rel_path} with every part "
+                        f"already downloaded ({job.job_id})"
+                    )
+                    return None
+
+                try:
+                    await self._fetch_next_volume(job, state)
+                except Exception:
+                    logger.exception(
+                        f"Failed to fetch the next volume for {rel_path} ({job.job_id})"
+                    )
+                    return None
+
+    async def process_multivolume(self, job, messages: list) -> bool:
+
+        logger.info(f"Multi-volume archive processing started ({job.job_id})")
+
+        job.set_status(JobStatus.PROCESSING)
+
+        parts = self._sort_parts(messages)
+        total_parts = len(parts)
+
+        first_path = await self._download_volume(job, parts[0], 1)
+
+        if first_path is None:
+            job.set_status(JobStatus.FAILED)
+            raise ValueError("Failed to download the first part")
+
+        volume_size = first_path.stat().st_size
+
+        password = job.options.password or None
+        password = await self._prepare_streaming(job, ".rar", password, archive_path=first_path)
+
+        loop = asyncio.get_event_loop()
+
+        entries = await loop.run_in_executor(
+            None, self._list_rar_entries_with_size_sync, first_path,
+        )
+
+        if not entries:
+            job.set_status(JobStatus.FAILED)
+            raise ValueError("Archive contained no files")
+
+        keep_window = self._compute_keep_window(volume_size, entries)
+
+        logger.info(
+            f"Multi-volume archive: {total_parts} parts declared, "
+            f"keeping volume 1 + a window of {keep_window} ({job.job_id})"
+        )
+
+        tree = {"__files__": [], "__children__": {}}
+
+        for rel_path, mtime, _size in entries:
+            path_parts = rel_path.split("/")
+            node = tree
+            for part in path_parts[:-1]:
+                node = node["__children__"].setdefault(
+                    part, {"__files__": [], "__children__": {}},
+                )
+            node["__files__"].append((rel_path, mtime))
+
+        from dispatcher.dispatcher import Dispatcher
+        from utils.filetype import FileTypeDetector
+
+        dispatcher = Dispatcher()
+
+        original_rename = job.options.rename_to
+        job.options.rename_to = ""
+
+        state = {
+            "volumes": {1: first_path},
+            "next_to_fetch": 2,
+            "keep_window": keep_window,
+            "total_parts": total_parts,
+            "parts": parts,
+            "password": password,
+        }
+
+        try:
+            await self._stream_node_multivolume(
+                job, tree, "", dispatcher, FileTypeDetector, state,
+            )
+        finally:
+            job.options.rename_to = original_rename
+            job.current_extract_folder = ""
+
+            for path in state["volumes"].values():
+                if path.exists():
+                    try:
+                        path.unlink()
+                    except OSError:
+                        pass
+
+        if job.has_output:
+            job.set_status(JobStatus.COMPLETED)
+        else:
+            job.set_status(JobStatus.FAILED)
+
+        logger.info(f"Multi-volume archive processing finished ({job.job_id})")
+
+        return job.has_output
+
+    async def _stream_node_multivolume(self, job, node, relative_folder, dispatcher, FileTypeDetector, state):
+
+        if relative_folder:
+            await self._announce_folder(job, relative_folder)
+
+        job.current_extract_folder = relative_folder
+
+        ordered_files = self._order_items(
+            job,
+            node["__files__"],
+            name_of=lambda it: Path(it[0]).name,
+            mtime_of=lambda it: it[1],
+        )
+
+        for rel_path, _mtime in ordered_files:
+
+            extracted_path = await self._extract_with_more_volumes(job, state, rel_path)
+
+            if extracted_path is None:
+                continue
+
+            file_type = FileTypeDetector.detect("", extracted_path.name)
+
+            job.input_file = extracted_path
+            job.original_name = strip_excluded(extracted_path.name, job.options.exclude_text)
+
+            if file_type == "UNKNOWN":
+                job.add_output(extracted_path, kind="document")
+                continue
+
+            job.file_type = file_type
+
+            try:
+                await dispatcher.dispatch(job)
+            except Exception:
+                logger.exception(
+                    f"Failed to process extracted file {rel_path} ({job.job_id})"
+                )
+
+            if extracted_path.exists():
+                try:
+                    extracted_path.unlink()
+                except OSError:
+                    pass
+
+        reverse = job.options.sort_order == "desc"
+        child_names = sorted(node["__children__"].keys(), key=_natural_key, reverse=reverse)
+
+        for child_name in child_names:
+            child_relative = f"{relative_folder}/{child_name}" if relative_folder else child_name
+            await self._stream_node_multivolume(
+                job, node["__children__"][child_name], child_relative,
+                dispatcher, FileTypeDetector, state,
+            )
 
     async def _announce_folder(self, job, relative_str: str):
 

@@ -71,6 +71,9 @@ class PendingFile:
     file_type: str
     source_message: Message
     options: dict = field(default_factory=dict)
+    is_multipart: bool = False
+    parts_total: int = 0
+    part_message_ids: list = field(default_factory=list)
 
 
 # In-memory state. Fine for a single-process bot; cleared on restart.
@@ -120,6 +123,15 @@ def options_keyboard(pid: str) -> InlineKeyboardMarkup:
 
     if pending.file_type == "AUDIO" or o.get("quality") in ("mp3", "m4a", "voice"):
         rows.append([InlineKeyboardButton(text="🎵 عنوان و خواننده", callback_data=f"o:{pid}:title")])
+
+    if pending.file_type == "ARCHIVE":
+        if pending.is_multipart:
+            rows.append([InlineKeyboardButton(
+                text=f"📦 چندبخشی: {len(pending.part_message_ids)}/{pending.parts_total} بخش دریافت شد",
+                callback_data="nothing",
+            )])
+        else:
+            rows.append([InlineKeyboardButton(text="📦 آرشیو چندبخشی است", callback_data=f"o:{pid}:multipart")])
 
     rows.append([InlineKeyboardButton(text="✏️ تغییر نام فایل", callback_data=f"o:{pid}:name")])
 
@@ -391,6 +403,16 @@ async def options_action(callback: CallbackQuery):
         await callback.answer()
         return
 
+    if action == "multipart":
+        awaiting_state[pending.user_id] = f"file:{pid}:parts_count"
+        await callback.message.answer(
+            "این آرشیو چند بخش/تکه است؟ یک عدد بفرستید (مثلاً 5).\n"
+            "بعد از اعلام تعداد، بخش‌هایی که همین الان فرستادید به‌عنوان بخش ۱ ثبت می‌شود "
+            "و باید بقیه‌ی بخش‌ها را یکی‌یکی، به‌همین ترتیب که خودتان مرتب کرده‌اید، بفرستید."
+        )
+        await callback.answer()
+        return
+
     if action == "target":
         await callback.message.edit_text(
             "مقصد ارسال فایل نهایی را انتخاب کنید:",
@@ -408,6 +430,11 @@ async def options_action(callback: CallbackQuery):
         await callback.message.edit_text("❌ لغو شد.")
         await callback.answer()
         return
+
+
+@dp.callback_query(F.data == "nothing")
+async def noop_callback(callback: CallbackQuery):
+    await callback.answer()
 
 
 @dp.callback_query(F.data.startswith("t:"))
@@ -441,17 +468,32 @@ async def target_pick(callback: CallbackQuery):
 
 async def finalize_job(callback: CallbackQuery, pending: PendingFile, pid: str):
 
-    forwarded = await pending.source_message.forward(Telegram.GROUP_ID)
+    if pending.is_multipart:
 
-    job_data = {
-        "type": MessageType.JOB.value,
-        "user_id": pending.user_id,
-        "message_id": forwarded.message_id,
-        "file_type": pending.file_type,
-        "file_name": pending.file_name,
-        "original_chat_id": pending.chat_id,
-        "options": pending.options,
-    }
+        job_data = {
+            "type": MessageType.JOB.value,
+            "user_id": pending.user_id,
+            "message_id": pending.part_message_ids[0],
+            "part_message_ids": pending.part_message_ids,
+            "file_type": pending.file_type,
+            "file_name": pending.file_name,
+            "original_chat_id": pending.chat_id,
+            "options": pending.options,
+        }
+
+    else:
+
+        forwarded = await pending.source_message.forward(Telegram.GROUP_ID)
+
+        job_data = {
+            "type": MessageType.JOB.value,
+            "user_id": pending.user_id,
+            "message_id": forwarded.message_id,
+            "file_type": pending.file_type,
+            "file_name": pending.file_name,
+            "original_chat_id": pending.chat_id,
+            "options": pending.options,
+        }
 
     await telegram_service.send_job(job_data)
 
@@ -598,6 +640,57 @@ async def handle_awaited_input(message: Message, state: str) -> bool:
             pending.options["target_label"] = label
             awaiting_state.pop(user_id, None)
             await message.answer("✅ مقصد بروزرسانی شد.", reply_markup=options_keyboard(pid))
+            return True
+
+        if field_name == "parts_count":
+            if not message.text or not message.text.strip().isdigit():
+                await message.answer("لطفاً فقط یک عدد بفرستید (مثلاً 5).")
+                return True
+
+            total = int(message.text.strip())
+
+            if total < 2 or total > 100:
+                await message.answer("تعداد بخش باید بین 2 تا 100 باشد.")
+                return True
+
+            forwarded = await pending.source_message.forward(Telegram.GROUP_ID)
+
+            pending.is_multipart = True
+            pending.parts_total = total
+            pending.part_message_ids = [forwarded.message_id]
+
+            awaiting_state[user_id] = f"file:{pid}:next_part"
+
+            await message.answer(
+                f"✅ بخش ۱ از {total} ثبت شد. لطفاً بخش ۲ را بفرستید."
+            )
+            return True
+
+        if field_name == "next_part":
+            file = message.document or message.video or message.audio
+
+            if not file:
+                await message.answer("لطفاً فایل بخش بعدی را بفرستید.")
+                return True
+
+            forwarded = await message.forward(Telegram.GROUP_ID)
+            pending.part_message_ids.append(forwarded.message_id)
+
+            received = len(pending.part_message_ids)
+
+            if received < pending.parts_total:
+                await message.answer(
+                    f"✅ بخش {received} از {pending.parts_total} ثبت شد. بخش بعدی را بفرستید."
+                )
+                return True
+
+            awaiting_state.pop(user_id, None)
+
+            await message.answer(
+                f"✅ هر {pending.parts_total} بخش دریافت شد. "
+                "تنظیمات نهایی را بررسی و در صورت نیاز تغییر دهید:",
+                reply_markup=options_keyboard(pid),
+            )
             return True
 
     return False

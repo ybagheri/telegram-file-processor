@@ -1,4 +1,5 @@
 import asyncio
+import re
 
 from telethon import events
 from telethon.errors import FloodWaitError
@@ -11,6 +12,7 @@ from core.logger import get_logger
 from core.password_broker import password_broker
 from core.protocol import Protocol
 from dispatcher.dispatcher import Dispatcher
+from processors.archive import ArchiveProcessor
 from services.telegram import telegram_service
 from utils.filetype import FileTypeDetector
 from utils.text import strip_excluded
@@ -18,6 +20,7 @@ from utils.text import strip_excluded
 logger = get_logger(__name__)
 
 dispatcher = Dispatcher()
+archive_processor = ArchiveProcessor()
 
 
 def _build_options(raw: dict) -> JobOptions:
@@ -26,7 +29,32 @@ def _build_options(raw: dict) -> JobOptions:
     return JobOptions(**filtered)
 
 
+# Recognizes common multi-volume RAR naming so the base course name can be
+# recovered for renaming/titles: "name.part03.rar", "name.r00", "name.r01".
+_PART_SUFFIX_RE = re.compile(r"\.part\d+(\.rar)?$|\.r\d{2}$", re.IGNORECASE)
+
+
+def _strip_part_suffix(filename: str) -> str:
+    from pathlib import Path
+
+    stem_with_ext = _PART_SUFFIX_RE.sub("", filename)
+
+    if stem_with_ext == filename:
+        return filename
+
+    if not Path(stem_with_ext).suffix:
+        stem_with_ext += ".rar"
+
+    return stem_with_ext
+
+
 async def process_job(payload: dict):
+
+    part_ids = payload.get("part_message_ids")
+
+    if part_ids and len(part_ids) > 1:
+        await process_multipart_job(payload, part_ids)
+        return
 
     message_id = payload.get("message_id")
 
@@ -87,6 +115,7 @@ async def process_job(payload: dict):
         return
 
     success = False
+    error_message = "Processing failed"
 
     try:
         success = await dispatcher.dispatch(job)
@@ -94,8 +123,53 @@ async def process_job(payload: dict):
         logger.exception("Unhandled error while dispatching job %s", job.job_id)
         success = False
         error_message = (str(e) or "Processing failed")[:300]
-    else:
-        error_message = "Processing failed"
+
+    await _deliver_and_cleanup(job, success, error_message)
+
+
+async def process_multipart_job(payload: dict, part_ids: list[int]):
+    """A user-declared multi-volume RAR archive: the parts arrive as
+    separate bridge messages (one per volume the user sent). Delegates the
+    actual disk-conscious download/extract/upload cycle to
+    ArchiveProcessor.process_multivolume — see processors/archive.py."""
+
+    messages = await telegram_service.client.get_messages(
+        Telegram.GROUP_ID,
+        ids=part_ids,
+    )
+
+    messages = [m for m in messages if m is not None and m.media]
+
+    if len(messages) < 2:
+        logger.warning("Multipart job has too few valid parts: %s", part_ids)
+        return
+
+    job = Job(
+        user_id=payload["user_id"],
+        message_id=part_ids[0],
+        options=_build_options(payload.get("options", {})),
+    )
+
+    job.file_type = "ARCHIVE"
+
+    first_name = (messages[0].file.name if messages[0].file else None) or "archive.rar"
+    base_name = _strip_part_suffix(first_name)
+    job.original_name = strip_excluded(base_name, job.options.exclude_text)
+
+    success = False
+    error_message = "Processing failed"
+
+    try:
+        success = await archive_processor.process_multivolume(job, messages)
+    except Exception as e:
+        logger.exception("Unhandled error while processing multipart job %s", job.job_id)
+        success = False
+        error_message = (str(e) or "Processing failed")[:300]
+
+    await _deliver_and_cleanup(job, success, error_message)
+
+
+async def _deliver_and_cleanup(job, success: bool, error_message: str):
 
     if job.has_output:
 
