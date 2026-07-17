@@ -19,17 +19,6 @@ Generic instructions for any coding agent (Claude Code, Cursor, Aider, Copilot W
 
 1. Check `CLAUDE.md`'s "Hard rules" section — several past bugs came from violating one of those.
 2. If the change touches `core/job.py`, `core/job_options.py`, or the bridge protocol (`core/protocol.py`), grep for every call site — these are shared across `bot.py`, `worker.py`, and every processor.
-3. Prefer adding a test in `tests/` for new logic that doesn't need real Telegram/ffmpeg (sorting, filename cleanup, protocol encode/decode, dispatcher wiring). See `CONTRIBUTING.md`.
-
-## Testing
-
-```bash
-pip install -r requirements.txt
-pip install pytest
-pytest tests/
-```
-
-`tests/conftest.py` sets dummy env vars so `config.py`'s startup validation doesn't need real Telegram credentials. Tests must not require network access or a running bot/worker — anything that does belongs in manual testing, not `tests/`.
 
 ## Logging
 

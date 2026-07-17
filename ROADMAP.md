@@ -13,7 +13,6 @@
 - [x] Linked Table of Contents for archive folders (channel/group delivery only)
 - [x] FloodWait-aware sending for large batches
 - [x] Processor registry (plugin-style, no dispatcher edits needed for new types)
-- [x] Offline unit test suite
 
 ## Planned / ideas
 
@@ -24,4 +23,4 @@
 - [ ] AI-generated captions/summaries for delivered files
 - [ ] Per-file progress reporting for very large archives
 - [ ] Optional virus/malware scanning before delivery
-- [ ] Docker image published to a registry (Dockerfile/compose exist; not yet published)
+- [ ] Docker packaging (Dockerfile/docker-compose for the two long-running processes)

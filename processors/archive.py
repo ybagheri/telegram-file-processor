@@ -1,10 +1,13 @@
 from __future__ import annotations
 
 import asyncio
+import math
 import os
 import re
+import tempfile
 import time
 import zipfile
+from datetime import datetime
 from pathlib import Path
 
 from telethon.errors import FloodWaitError
@@ -13,7 +16,7 @@ from core.constants import JobStatus
 from core.logger import get_logger
 from core.password_broker import password_broker
 from core.protocol import Protocol
-from core.registry import register_processor
+from core.registry import get_registered_processors, register_processor
 
 from services.telegram import telegram_service
 from utils.text import strip_excluded
@@ -33,6 +36,14 @@ PASSWORD_TIMEOUT_SECONDS = 300
 # decompressing everything before them in the same block anyway — so for
 # .7z we still extract everything up front, same as before.
 STREAMABLE_SUFFIXES = {".zip", ".rar"}
+
+# .rar is handled by shelling out to the real `unrar` CLI (not the rarfile
+# Python package): unrar is what actually understands multi-volume sets,
+# handles partial-volume-availability correctly, and is what's already
+# installed/trusted on the deployment server.
+_UNRAR_LISTING_LINE_RE = re.compile(
+    r"^([* ])\s*(\S+)\s+(\d+)\s+(\d+)\s+(\d+)%\s+(\d{4}-\d{2}-\d{2})\s+(\d{2}:\d{2})\s+([0-9A-Fa-f]{8})\s+(.+)$"
+)
 
 
 class _PasswordRequired(Exception):
@@ -64,6 +75,35 @@ def _leading_number(name: str):
     return int(match.group(1)) if match else None
 
 
+def _parse_unrar_listing(output: str) -> list[tuple[str, float, int]]:
+    """Parses `unrar v` output (see the real sample this regex was built
+    and tested against). Returns (relative_path, mtime, size) for files,
+    skipping directory entries."""
+
+    entries = []
+
+    for line in output.splitlines():
+
+        match = _UNRAR_LISTING_LINE_RE.match(line)
+
+        if not match:
+            continue
+
+        _marker, attrs, size, _packed, _ratio, date, time_str, _checksum, name = match.groups()
+
+        if "d" in attrs.lower():
+            continue  # directory entry, not a file
+
+        try:
+            mtime = datetime.strptime(f"{date} {time_str}", "%Y-%m-%d %H:%M").timestamp()
+        except ValueError:
+            mtime = 0.0
+
+        entries.append((name.strip().replace("\\", "/"), mtime, int(size)))
+
+    return entries
+
+
 @register_processor("ARCHIVE")
 class ArchiveProcessor:
 
@@ -83,7 +123,7 @@ class ArchiveProcessor:
 
             password = await self._prepare_streaming(job, suffix, password)
 
-            entries = await self._list_entries(job.input_file, suffix)
+            entries = await self._list_entries(job.input_file, suffix, password)
 
             if not entries:
                 job.set_status(JobStatus.FAILED)
@@ -161,20 +201,18 @@ class ArchiveProcessor:
 
     async def _prepare_streaming(self, job, suffix, password, archive_path=None) -> str | None:
 
-        loop = asyncio.get_event_loop()
-
         path_to_check = archive_path if archive_path is not None else job.input_file
 
         for attempt in range(2):
 
             try:
-                await loop.run_in_executor(
-                    None,
-                    self._validate_password_sync,
-                    path_to_check,
-                    suffix,
-                    password,
-                )
+                if suffix == ".rar":
+                    await self._validate_rar_password(path_to_check, password)
+                else:
+                    loop = asyncio.get_event_loop()
+                    await loop.run_in_executor(
+                        None, self._validate_zip_password_sync, path_to_check, password,
+                    )
                 return password
 
             except (_PasswordRequired, _WrongPassword):
@@ -219,130 +257,193 @@ class ArchiveProcessor:
             raise
 
     # =====================================================
-    # Streaming extraction (zip / rar): list without extracting, validate
-    # the password against one entry in memory, then extract one member
-    # at a time on demand.
+    # ZIP: stdlib zipfile (unchanged)
     # =====================================================
 
-    def _validate_password_sync(self, input_file, suffix, password):
+    def _validate_zip_password_sync(self, input_file, password):
 
-        if suffix == ".zip":
+        with zipfile.ZipFile(input_file) as archive:
 
-            with zipfile.ZipFile(input_file) as archive:
+            infos = [i for i in archive.infolist() if not i.is_dir()]
+            needs_password = any(info.flag_bits & 0x1 for info in infos)
 
-                infos = archive.infolist()
-                needs_password = any(info.flag_bits & 0x1 for info in infos)
+            if needs_password and not password:
+                raise _PasswordRequired()
 
-                if needs_password and not password:
-                    raise _PasswordRequired()
-
-                if needs_password:
-                    first_file = next((i for i in infos if not i.is_dir()), None)
-                    if first_file:
-                        try:
-                            archive.read(first_file.filename, pwd=password.encode())
-                        except RuntimeError as e:
-                            if "password" in str(e).lower():
-                                raise _WrongPassword()
-                            raise
-
-        elif suffix == ".rar":
-
-            import rarfile
-
-            with rarfile.RarFile(input_file) as archive:
-
-                needs_password = archive.needs_password()
-
-                if needs_password and not password:
-                    raise _PasswordRequired()
-
-                if needs_password:
-                    infos = archive.infolist()
-                    first_file = next((i for i in infos if not i.isdir()), None)
-                    if first_file:
-                        try:
-                            archive.read(first_file.filename, pwd=password)
-                        except rarfile.RarWrongPassword:
+            if needs_password:
+                # Probe the smallest entry — cheaper, and consistent with
+                # the RAR path's reasoning (see _validate_rar_password).
+                smallest = min(infos, key=lambda i: i.file_size, default=None)
+                if smallest:
+                    try:
+                        archive.read(smallest.filename, pwd=password.encode())
+                    except RuntimeError as e:
+                        if "password" in str(e).lower():
                             raise _WrongPassword()
-                        except rarfile.PasswordRequired:
-                            raise _PasswordRequired()
+                        raise
 
-    async def _list_entries(self, input_file, suffix) -> list[tuple[str, float]]:
-
-        loop = asyncio.get_event_loop()
-
-        return await loop.run_in_executor(
-            None, self._list_entries_sync, input_file, suffix,
-        )
-
-    def _list_entries_sync(self, input_file, suffix) -> list[tuple[str, float]]:
+    def _list_zip_entries_sync(self, input_file) -> list[tuple[str, float, int]]:
 
         entries = []
 
-        if suffix == ".zip":
-
-            with zipfile.ZipFile(input_file) as archive:
-                for info in archive.infolist():
-                    if info.is_dir():
-                        continue
-                    mtime = time.mktime((*info.date_time, 0, 0, -1))
-                    entries.append((info.filename.replace("\\", "/"), mtime))
-
-        elif suffix == ".rar":
-
-            import rarfile
-
-            with rarfile.RarFile(input_file) as archive:
-                for info in archive.infolist():
-                    if info.isdir():
-                        continue
-                    mtime = time.mktime((*info.date_time, 0, 0, -1))
-                    entries.append((info.filename.replace("\\", "/"), mtime))
+        with zipfile.ZipFile(input_file) as archive:
+            for info in archive.infolist():
+                if info.is_dir():
+                    continue
+                mtime = time.mktime((*info.date_time, 0, 0, -1))
+                entries.append((info.filename.replace("\\", "/"), mtime, info.file_size))
 
         return entries
 
-    def _extract_single_sync(self, input_file, destination_root, suffix, password, rel_path) -> str:
+    def _extract_zip_single_sync(self, input_file, destination_root, password, rel_path) -> str:
 
         try:
-            if suffix == ".zip":
-                with zipfile.ZipFile(input_file) as archive:
-                    pwd_bytes = password.encode() if password else None
-                    return archive.extract(rel_path, path=str(destination_root), pwd=pwd_bytes)
-
-            if suffix == ".rar":
-                import rarfile
-                with rarfile.RarFile(input_file) as archive:
-                    return archive.extract(rel_path, path=str(destination_root), pwd=password)
-
-            raise ValueError(f"Unsupported streaming format: {suffix}")
-
+            with zipfile.ZipFile(input_file) as archive:
+                pwd_bytes = password.encode() if password else None
+                return archive.extract(rel_path, path=str(destination_root), pwd=pwd_bytes)
         except RuntimeError as e:
             if "password" in str(e).lower():
                 raise _WrongPassword()
             raise
 
-        except Exception as e:
-            try:
-                import rarfile
-                if isinstance(e, rarfile.RarWrongPassword):
+    # =====================================================
+    # RAR: shells out to the real `unrar` CLI (see module docstring note)
+    # =====================================================
+
+    async def _run_unrar(self, args: list[str]) -> tuple[int, str, str]:
+
+        process = await asyncio.create_subprocess_exec(
+            "unrar", *args,
+            stdout=asyncio.subprocess.PIPE,
+            stderr=asyncio.subprocess.PIPE,
+        )
+
+        stdout_bytes, stderr_bytes = await process.communicate()
+
+        return (
+            process.returncode,
+            stdout_bytes.decode("utf-8", errors="replace"),
+            stderr_bytes.decode("utf-8", errors="replace"),
+        )
+
+    async def _list_rar_via_unrar(self, archive_path: Path, password: str | None) -> list[tuple[str, float, int]]:
+
+        args = ["v", "-y", f"-p{password}" if password else "-p-", str(archive_path)]
+
+        returncode, stdout, stderr = await self._run_unrar(args)
+
+        entries = _parse_unrar_listing(stdout)
+
+        if not entries and returncode != 0:
+            combined = (stdout + stderr).lower()
+            if "password" in combined:
+                raise _PasswordRequired()
+            raise ValueError(f"unrar listing failed (code {returncode}): {stderr.strip()[:300]}")
+
+        return entries
+
+    async def _validate_rar_password(self, archive_path: Path, password: str | None):
+
+        entries = await self._list_rar_via_unrar(archive_path, password)
+
+        if not entries:
+            raise ValueError("Archive contained no files")
+
+        # Try extracting a handful of the SMALLEST entries to a throwaway
+        # temp dir. For a multi-volume archive validated against only the
+        # first volume, the first-*listed* file is often a large one (e.g.
+        # a scanned textbook PDF) that spans several volumes — trying that
+        # one would fail with a "missing volume" error that has nothing to
+        # do with the password. Smaller entries are far more likely to be
+        # fully containable in what we've downloaded so far. If every
+        # candidate is inconclusive, defer to the real per-file extraction
+        # pass later (which fetches more volumes on demand and is the
+        # actual final judge of whether the password was right).
+        candidates = sorted(entries, key=lambda e: e[2])[:5]
+
+        with tempfile.TemporaryDirectory() as tmp_dir:
+
+            for rel_path, _mtime, _size in candidates:
+
+                args = [
+                    "x", "-y", "-o+",
+                    f"-p{password}" if password else "-p-",
+                    str(archive_path), rel_path, tmp_dir + os.sep,
+                ]
+
+                returncode, stdout, stderr = await self._run_unrar(args)
+
+                if returncode == 0:
+                    return  # a clean extraction confirms the password is correct
+
+                combined = (stdout + stderr).lower()
+
+                if "password" in combined or "encrypt" in combined:
+                    if not password:
+                        raise _PasswordRequired()
                     raise _WrongPassword()
-                if isinstance(e, rarfile.PasswordRequired):
+
+                # Otherwise inconclusive (most likely "needs a volume we
+                # don't have yet") — try the next smallest candidate.
+
+    async def _extract_rar_single(self, archive_path: Path, destination_root: Path, password: str | None, rel_path: str) -> Path:
+
+        destination_root.mkdir(parents=True, exist_ok=True)
+
+        args = [
+            "x", "-y", "-o+",
+            f"-p{password}" if password else "-p-",
+            str(archive_path), rel_path, str(destination_root) + os.sep,
+        ]
+
+        returncode, stdout, stderr = await self._run_unrar(args)
+
+        extracted_path = destination_root / rel_path
+
+        if returncode != 0 or not extracted_path.exists():
+
+            combined = (stdout + stderr).lower()
+
+            if "password" in combined or "encrypt" in combined:
+                if not password:
                     raise _PasswordRequired()
-            except ImportError:
-                pass
-            raise
+                raise _WrongPassword()
+
+            raise RuntimeError(
+                f"unrar extraction failed for {rel_path} (code {returncode}): {stderr.strip()[:300]}"
+            )
+
+        return extracted_path
+
+    # =====================================================
+    # Streaming extraction (zip / rar): list without extracting, validate
+    # the password against a couple of entries, then extract one member
+    # at a time on demand.
+    # =====================================================
+
+    async def _list_entries(self, input_file, suffix, password=None) -> list[tuple[str, float, int]]:
+
+        if suffix == ".rar":
+            return await self._list_rar_via_unrar(input_file, password)
+
+        loop = asyncio.get_event_loop()
+
+        return await loop.run_in_executor(
+            None, self._list_zip_entries_sync, input_file,
+        )
 
     async def _extract_single(self, input_file, destination_root, suffix, password, rel_path) -> Path:
+
+        if suffix == ".rar":
+            return await self._extract_rar_single(input_file, destination_root, password, rel_path)
 
         loop = asyncio.get_event_loop()
 
         result = await loop.run_in_executor(
             None,
-            self._extract_single_sync,
+            self._extract_zip_single_sync,
             input_file,
             destination_root,
-            suffix,
             password,
             rel_path,
         )
@@ -421,7 +522,7 @@ class ArchiveProcessor:
 
         tree = {"__files__": [], "__children__": {}}
 
-        for rel_path, mtime in entries:
+        for rel_path, mtime, _size in entries:
             parts = rel_path.split("/")
             node = tree
             for part in parts[:-1]:
@@ -452,6 +553,8 @@ class ArchiveProcessor:
 
     async def _stream_node(self, job, node, relative_folder, suffix, password, dispatcher, FileTypeDetector, archive_path):
 
+        registered_types = get_registered_processors()
+
         if relative_folder:
             await self._announce_folder(job, relative_folder)
 
@@ -481,9 +584,13 @@ class ArchiveProcessor:
             job.input_file = extracted_path
             job.original_name = strip_excluded(extracted_path.name, job.options.exclude_text)
 
-            if file_type == "UNKNOWN":
-                # This raw extracted file IS the output — keep it on disk
-                # until it's uploaded (worker.py deletes it after upload).
+            if file_type not in registered_types:
+                # No processor handles this type (e.g. a plain image, or
+                # anything else FileTypeDetector recognizes but we don't
+                # have a dedicated processor for) — this raw extracted
+                # file IS the output, deliver it as-is rather than
+                # silently dropping it. Keep it on disk until it's
+                # uploaded (worker.py deletes it after upload).
                 job.add_output(extracted_path, kind="document")
                 continue
 
@@ -536,6 +643,7 @@ class ArchiveProcessor:
         from utils.filetype import FileTypeDetector
 
         dispatcher = Dispatcher()
+        registered_types = get_registered_processors()
 
         reverse = job.options.sort_order == "desc"
 
@@ -574,7 +682,7 @@ class ArchiveProcessor:
                     job.input_file = extracted
                     job.original_name = strip_excluded(extracted.name, job.options.exclude_text)
 
-                    if file_type == "UNKNOWN":
+                    if file_type not in registered_types:
                         job.add_output(extracted, kind="document")
                         continue
 
@@ -600,8 +708,8 @@ class ArchiveProcessor:
     # message because the whole archive is too big for local disk at
     # once). We keep volume 1 (needed to open/list the archive) plus a
     # sliding window of the most recent volumes, sized from the *real*
-    # per-file compressed sizes in the listing — never guessed — so we
-    # never risk deleting a volume a pending file still needs.
+    # per-file sizes in the listing — never guessed — so we never risk
+    # deleting a volume a pending file still needs.
     # =====================================================
 
     def _sort_parts(self, messages):
@@ -629,36 +737,15 @@ class ArchiveProcessor:
 
         return await telegram_service.download(message, destination)
 
-    def _list_rar_entries_with_size_sync(self, input_file) -> list[tuple[str, float, int]]:
-
-        import rarfile
-
-        entries = []
-
-        with rarfile.RarFile(input_file) as archive:
-            for info in archive.infolist():
-                if info.isdir():
-                    continue
-                mtime = time.mktime((*info.date_time, 0, 0, -1))
-                entries.append((
-                    info.filename.replace("\\", "/"),
-                    mtime,
-                    info.compress_size,
-                ))
-
-        return entries
-
     def _compute_keep_window(self, volume_size: int, entries) -> int:
 
         if volume_size <= 0:
             return 3  # can't compute safely; fall back to a cautious default
 
-        import math
-
         max_span = 1
 
-        for _rel_path, _mtime, compress_size in entries:
-            span = math.ceil((compress_size or 0) / volume_size) + 1
+        for _rel_path, _mtime, size in entries:
+            span = math.ceil((size or 0) / volume_size) + 1
             max_span = max(max_span, span)
 
         return max(2, max_span)
@@ -698,8 +785,8 @@ class ArchiveProcessor:
         while True:
 
             try:
-                return await self._extract_single(
-                    state["volumes"][1], job.extracted_dir, ".rar", state["password"], rel_path,
+                return await self._extract_rar_single(
+                    state["volumes"][1], job.extracted_dir, state["password"], rel_path,
                 )
 
             except Exception:
@@ -739,11 +826,7 @@ class ArchiveProcessor:
         password = job.options.password or None
         password = await self._prepare_streaming(job, ".rar", password, archive_path=first_path)
 
-        loop = asyncio.get_event_loop()
-
-        entries = await loop.run_in_executor(
-            None, self._list_rar_entries_with_size_sync, first_path,
-        )
+        entries = await self._list_rar_via_unrar(first_path, password)
 
         if not entries:
             job.set_status(JobStatus.FAILED)
@@ -810,6 +893,8 @@ class ArchiveProcessor:
 
     async def _stream_node_multivolume(self, job, node, relative_folder, dispatcher, FileTypeDetector, state):
 
+        registered_types = get_registered_processors()
+
         if relative_folder:
             await self._announce_folder(job, relative_folder)
 
@@ -834,7 +919,7 @@ class ArchiveProcessor:
             job.input_file = extracted_path
             job.original_name = strip_excluded(extracted_path.name, job.options.exclude_text)
 
-            if file_type == "UNKNOWN":
+            if file_type not in registered_types:
                 job.add_output(extracted_path, kind="document")
                 continue
 

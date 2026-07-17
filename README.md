@@ -39,6 +39,7 @@ See [`docs/architecture.md`](docs/architecture.md) for the full write-up (bridge
 
 - Python 3.10+
 - `ffmpeg` (and `ffprobe`) on `PATH`
+- The real `unrar` CLI on `PATH` (for `.rar` archives, including multi-volume/password-protected ones) — Debian/Ubuntu's default `unrar-free` package is a different, less capable reimplementation and is not sufficient; install the genuine RarLab build (`apt-get install unrar` from the `contrib non-free` repos on Debian, or download from [rarlab.com](https://www.rarlab.com/rar_add.htm))
 - A Telegram bot token ([@BotFather](https://t.me/BotFather))
 - A Telegram user account's API ID/hash ([my.telegram.org](https://my.telegram.org)) — required because `worker.py` uses a full user account (via Telethon) to bypass the Bot API's 20MB/50MB download limits
 - A private Telegram group with both the bot and the user account added (the "bridge")
@@ -91,7 +92,6 @@ dispatcher/dispatcher.py   # routes a Job to the right registered processor
 processors/                 # one file per file-type handler (video/audio/pdf/archive)
 services/                    # Telegram I/O, ffmpeg wrapper, tagging, per-user settings storage
 utils/                         # small stateless helpers (file-type sniffing, EXCLUDE text stripping)
-tests/                          # fast, offline unit tests (see CONTRIBUTING.md)
 ```
 
 ### Adding a new file type

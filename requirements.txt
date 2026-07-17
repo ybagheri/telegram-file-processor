@@ -5,6 +5,5 @@ moviepy
 pydub
 Pillow
 pymupdf
-rarfile
 py7zr
 mutagen
