@@ -224,6 +224,24 @@ async def settings_command(message: Message):
     await message.answer(**settings_text_and_keyboard(message.from_user.id))
 
 
+@dp.message(Command("cancel"), F.chat.type == "private")
+async def cancel_command(message: Message):
+    user_id = message.from_user.id
+
+    had_state = awaiting_state.pop(user_id, None) is not None
+
+    stale_pids = [pid for pid, p in pending_files.items() if p.user_id == user_id]
+    for pid in stale_pids:
+        pending_files.pop(pid, None)
+
+    pending_passwords.pop(user_id, None)
+
+    if had_state or stale_pids:
+        await message.answer("✅ لغو شد. می‌توانید یک فایل جدید بفرستید.")
+    else:
+        await message.answer("چیزی برای لغو کردن نبود.")
+
+
 # ======================================================================
 # Global settings callbacks
 # ======================================================================
@@ -329,10 +347,32 @@ async def settings_logo_position_pick(callback: CallbackQuery):
 
 @dp.callback_query(F.data == "s:target")
 async def settings_target(callback: CallbackQuery):
+    kb = InlineKeyboardMarkup(inline_keyboard=[
+        [InlineKeyboardButton(text="👤 ارسال به خودم", callback_data="starget:me")],
+        [InlineKeyboardButton(text="➕ تنظیم کانال/گروه جدید", callback_data="starget:new")],
+    ])
+    await callback.message.edit_text(
+        "مقصد پیش‌فرض ارسال فایل‌ها را انتخاب کنید:",
+        reply_markup=kb,
+    )
+    await callback.answer()
+
+
+@dp.callback_query(F.data.startswith("starget:"))
+async def settings_target_pick(callback: CallbackQuery):
+    choice = callback.data.split(":", 1)[1]
+
+    if choice == "me":
+        await settings_store.update(callback.from_user.id, target_chat_id=0, target_label="خودم")
+        await callback.message.edit_text(**settings_text_and_keyboard(callback.from_user.id))
+        await callback.answer("بروزرسانی شد")
+        return
+
     awaiting_state[callback.from_user.id] = "settings_target"
     await callback.message.answer(
-        "یک پیام از چت مقصد برای من فوروارد کنید یا @username آن را بفرستید.\n"
-        "⚠️ ربات باید عضو آن گروه/کانال باشد."
+        "یک پیام از چت مقصد برای من فوروارد کنید، @username یا آیدی عددی آن را بفرستید.\n"
+        "⚠️ ربات باید عضو آن گروه/کانال باشد.\n"
+        "برای انصراف /cancel را بفرستید."
     )
     await callback.answer()
 
@@ -441,6 +481,8 @@ async def options_action(callback: CallbackQuery):
 
     if action == "cancel":
         pending_files.pop(pid, None)
+        if awaiting_state.get(pending.user_id, "").startswith(f"file:{pid}:"):
+            awaiting_state.pop(pending.user_id, None)
         await callback.message.edit_text("❌ لغو شد.")
         await callback.answer()
         return
@@ -473,8 +515,9 @@ async def target_pick(callback: CallbackQuery):
     if choice == "new":
         awaiting_state[pending.user_id] = f"file:{pid}:target"
         await callback.message.answer(
-            "یک پیام از گروه/کانال مقصد برای من فوروارد کنید، یا @username آن را بفرستید.\n"
-            "⚠️ ربات باید عضو آن گروه/کانال (و دسترسی ارسال) داشته باشد."
+            "یک پیام از گروه/کانال مقصد برای من فوروارد کنید، @username یا آیدی عددی آن را بفرستید.\n"
+            "⚠️ ربات باید عضو آن گروه/کانال (و دسترسی ارسال) داشته باشد.\n"
+            "برای انصراف /cancel را بفرستید."
         )
         await callback.answer()
         return
@@ -542,11 +585,24 @@ async def _resolve_target(message: Message):
         return chat.id, (chat.title or chat.username or str(chat.id))
 
     if message.text:
+        text = message.text.strip()
+
         try:
-            chat = await bot.get_chat(message.text.strip())
+            chat = await bot.get_chat(text)
             return chat.id, (chat.title or chat.username or str(chat.id))
         except Exception:
-            return None, None
+            pass
+
+        # Fallback: a raw numeric chat id. Useful for private
+        # channels/groups with no public @username — especially ones with
+        # "protect content" enabled, where forwarding a message doesn't
+        # reveal its source chat at all.
+        try:
+            chat_id = int(text)
+            chat = await bot.get_chat(chat_id)
+            return chat.id, (chat.title or chat.username or str(chat.id))
+        except Exception:
+            pass
 
     return None, None
 
@@ -582,7 +638,16 @@ async def handle_awaited_input(message: Message, state: str) -> bool:
     if state == "settings_target":
         chat_id, label = await _resolve_target(message)
         if chat_id is None:
-            await message.answer("چت را نشناختم. یک پیام از آن فوروارد کنید یا @username بفرستید.")
+            if message.document or message.video or message.audio:
+                # They clearly want to work on a new file now, not finish
+                # setting a target — don't leave them stuck waiting.
+                awaiting_state.pop(user_id, None)
+                await message.answer("⏹ تنظیم مقصد لغو شد؛ این فایل را به‌عنوان کار جدید در نظر می‌گیرم.")
+                return False
+            await message.answer(
+                "چت را نشناختم. یک پیام از آن فوروارد کنید، @username یا آیدی عددی چت را بفرستید.\n"
+                "برای انصراف /cancel را بفرستید."
+            )
             return True
         await settings_store.update(user_id, target_chat_id=chat_id, target_label=label)
         awaiting_state.pop(user_id, None)
@@ -648,7 +713,14 @@ async def handle_awaited_input(message: Message, state: str) -> bool:
         if field_name == "target":
             chat_id, label = await _resolve_target(message)
             if chat_id is None:
-                await message.answer("چت را نشناختم. یک پیام از آن فوروارد کنید یا @username بفرستید.")
+                if message.document or message.video or message.audio:
+                    awaiting_state.pop(user_id, None)
+                    await message.answer("⏹ تنظیم مقصد لغو شد؛ این فایل را به‌عنوان کار جدید در نظر می‌گیرم.")
+                    return False
+                await message.answer(
+                    "چت را نشناختم. یک پیام از آن فوروارد کنید، @username یا آیدی عددی چت را بفرستید.\n"
+                    "برای انصراف /cancel را بفرستید."
+                )
                 return True
             pending.options["target_chat_id"] = chat_id
             pending.options["target_label"] = label
