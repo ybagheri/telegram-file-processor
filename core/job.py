@@ -37,6 +37,12 @@ class OutputFile:
 
     folder: str = ""         # path relative to the archive root, "" = top level
 
+    uploaded: bool = False    # set once delivered — lets archive processing
+                              # upload each file immediately (folder by
+                              # folder) instead of waiting for the whole
+                              # job to finish, without worker.py double-
+                              # delivering it afterward
+
 
 @dataclass(slots=True)
 class Job:

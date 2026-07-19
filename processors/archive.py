@@ -13,6 +13,7 @@ from pathlib import Path
 from telethon.errors import FloodWaitError
 
 from core.constants import JobStatus
+from core.delivery import upload_entry
 from core.logger import get_logger
 from core.password_broker import password_broker
 from core.protocol import Protocol
@@ -589,12 +590,15 @@ class ArchiveProcessor:
                 # anything else FileTypeDetector recognizes but we don't
                 # have a dedicated processor for) — this raw extracted
                 # file IS the output, deliver it as-is rather than
-                # silently dropping it. Keep it on disk until it's
-                # uploaded (worker.py deletes it after upload).
-                job.add_output(extracted_path, kind="document")
+                # silently dropping it.
+                entry = job.add_output(extracted_path, kind="document")
+                if entry:
+                    await upload_entry(job, entry)
                 continue
 
             job.file_type = file_type
+
+            before_count = len(job.output_files)
 
             try:
                 await dispatcher.dispatch(job)
@@ -602,6 +606,13 @@ class ArchiveProcessor:
                 logger.exception(
                     f"Failed to process extracted file {rel_path} ({job.job_id})"
                 )
+
+            # Deliver this file's output(s) right away — folder by folder,
+            # not "announce every folder, then upload everything at the
+            # very end" — so uploads keep pace with the folder they came
+            # from as the user actually sees them.
+            for new_entry in job.output_files[before_count:]:
+                await upload_entry(job, new_entry)
 
             # The processor (video/audio/pdf/archive) writes its own output
             # file elsewhere under output_dir — the raw extracted copy here
@@ -683,10 +694,14 @@ class ArchiveProcessor:
                     job.original_name = strip_excluded(extracted.name, job.options.exclude_text)
 
                     if file_type not in registered_types:
-                        job.add_output(extracted, kind="document")
+                        entry = job.add_output(extracted, kind="document")
+                        if entry:
+                            await upload_entry(job, entry)
                         continue
 
                     job.file_type = file_type
+
+                    before_count = len(job.output_files)
 
                     try:
                         await dispatcher.dispatch(job)
@@ -695,6 +710,9 @@ class ArchiveProcessor:
                             f"Failed to process extracted file "
                             f"{extracted.name} ({job.job_id})"
                         )
+
+                    for new_entry in job.output_files[before_count:]:
+                        await upload_entry(job, new_entry)
 
         finally:
             job.input_file = original_input
@@ -920,10 +938,14 @@ class ArchiveProcessor:
             job.original_name = strip_excluded(extracted_path.name, job.options.exclude_text)
 
             if file_type not in registered_types:
-                job.add_output(extracted_path, kind="document")
+                entry = job.add_output(extracted_path, kind="document")
+                if entry:
+                    await upload_entry(job, entry)
                 continue
 
             job.file_type = file_type
+
+            before_count = len(job.output_files)
 
             try:
                 await dispatcher.dispatch(job)
@@ -931,6 +953,9 @@ class ArchiveProcessor:
                 logger.exception(
                     f"Failed to process extracted file {rel_path} ({job.job_id})"
                 )
+
+            for new_entry in job.output_files[before_count:]:
+                await upload_entry(job, new_entry)
 
             if extracted_path.exists():
                 try:
@@ -950,10 +975,15 @@ class ArchiveProcessor:
 
     async def _announce_folder(self, job, relative_str: str):
 
+        clean_relative = "/".join(
+            strip_excluded(part, job.options.exclude_text)
+            for part in relative_str.split("/")
+        )
+
         payload = Protocol.create_folder(
             user_id=job.user_id,
             job_id=job.job_id,
-            folder=relative_str,
+            folder=clean_relative,
             target_chat_id=job.options.target_chat_id,
         )
 

@@ -9,6 +9,7 @@ from core.registry import register_processor
 
 from services.media import media_service
 from services.tags import tag_service
+from utils.text import strip_excluded
 
 logger = get_logger(__name__)
 
@@ -52,8 +53,8 @@ class AudioProcessor:
             await media_service.normalize_thumbnail(Path(job.options.custom_thumbnail), cover)
             entry.thumbnail = cover
 
-        title = job.options.title or tag_service.build_title(job.original_name)
-        artist = job.options.artist or Metadata.DEFAULT_ARTIST
+        title = strip_excluded(job.options.title, job.options.exclude_text) or tag_service.build_title(job.original_name)
+        artist = strip_excluded(job.options.artist, job.options.exclude_text) or Metadata.DEFAULT_ARTIST
 
         entry.title = title
         entry.artist = artist

@@ -133,6 +133,11 @@ def options_keyboard(pid: str) -> InlineKeyboardMarkup:
         else:
             rows.append([InlineKeyboardButton(text="📦 آرشیو چندبخشی است", callback_data=f"o:{pid}:multipart")])
 
+        rows.append([InlineKeyboardButton(
+            text=f"🔑 رمز آرشیو: {'تنظیم شده ✅' if o.get('password') else 'اگر می‌دانید تنظیم کنید'}",
+            callback_data=f"o:{pid}:archive_password",
+        )])
+
     rows.append([InlineKeyboardButton(text="✏️ تغییر نام فایل", callback_data=f"o:{pid}:name")])
 
     rows.append([InlineKeyboardButton(
@@ -413,6 +418,15 @@ async def options_action(callback: CallbackQuery):
         await callback.answer()
         return
 
+    if action == "archive_password":
+        awaiting_state[pending.user_id] = f"file:{pid}:archive_password"
+        await callback.message.answer(
+            "رمز این آرشیو را بفرستید.\n"
+            "اگر رمز را نمی‌دانید یا فراموش کردید، همین‌جا رد شوید — اگر لازم باشد، ربات خودش موقع پردازش رمز را از شما می‌خواهد."
+        )
+        await callback.answer()
+        return
+
     if action == "target":
         await callback.message.edit_text(
             "مقصد ارسال فایل نهایی را انتخاب کنید:",
@@ -666,11 +680,45 @@ async def handle_awaited_input(message: Message, state: str) -> bool:
             )
             return True
 
+        if field_name == "archive_password":
+            if not message.text:
+                await message.answer("لطفاً رمز را به‌صورت متن بفرستید.")
+                return True
+
+            skip_words = ("رد", "ندارم", "نمی‌دانم", "نمیدانم", "-")
+            text = message.text.strip()
+
+            if text not in skip_words:
+                pending.options["password"] = text
+                await message.answer("✅ رمز ذخیره شد.")
+            else:
+                pending.options["password"] = ""
+                await message.answer("باشه، رمز تنظیم نشد.")
+
+            awaiting_state.pop(user_id, None)
+
+            await message.answer(
+                "تنظیمات این فایل را بررسی و در صورت نیاز تغییر دهید:",
+                reply_markup=options_keyboard(pid),
+            )
+            return True
+
         if field_name == "next_part":
+
+            # A convenience shortcut: if the user knows the password, they
+            # can just type it here instead of going back to the dedicated
+            # button — it doesn't advance part collection.
+            if message.text and not (message.document or message.video or message.audio):
+                pending.options["password"] = message.text.strip()
+                await message.answer(
+                    f"✅ رمز ذخیره شد. حالا بخش {len(pending.part_message_ids) + 1} را بفرستید."
+                )
+                return True
+
             file = message.document or message.video or message.audio
 
             if not file:
-                await message.answer("لطفاً فایل بخش بعدی را بفرستید.")
+                await message.answer("لطفاً فایل بخش بعدی را بفرستید (یا رمز آرشیو را به‌صورت متن).")
                 return True
 
             forwarded = await message.forward(Telegram.GROUP_ID)

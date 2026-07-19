@@ -6,6 +6,7 @@ from telethon.errors import FloodWaitError
 
 from config import Telegram
 from core.constants import MessageType
+from core.delivery import upload_entry
 from core.job import Job
 from core.job_options import JobOptions
 from core.logger import get_logger
@@ -204,89 +205,12 @@ async def _deliver_and_cleanup(job, success: bool, error_message: str):
                 )
                 break
 
-        as_video_toggle = job.options.upload_as == "video"
-
         for entry in job.output_files:
 
-            output = entry.path
+            if entry.uploaded:
+                continue  # already delivered live during archive processing
 
-            force_document = True
-            voice_note = False
-            video_attrs = None
-            audio_attrs = None
-
-            if entry.kind == "voice":
-                force_document = False
-                voice_note = True
-
-            elif entry.kind == "video":
-                force_document = not as_video_toggle
-                if not force_document:
-                    video_attrs = {
-                        "duration": entry.duration,
-                        "width": entry.width,
-                        "height": entry.height,
-                    }
-
-            elif entry.kind == "audio":
-                force_document = False
-                audio_attrs = {
-                    "duration": entry.duration,
-                    "title": entry.title,
-                    "performer": entry.artist,
-                }
-
-            for attempt in range(2):
-
-                try:
-                    await telegram_service.upload_file(
-                        output,
-                        Protocol.create_result(
-                            user_id=job.user_id,
-                            job_id=job.job_id,
-                            files=[output.name[:200]],
-                            target_chat_id=job.options.target_chat_id,
-                        ),
-                        force_document=force_document,
-                        voice_note=voice_note,
-                        thumb=entry.thumbnail,
-                        video_attributes=video_attrs,
-                        audio_attributes=audio_attrs,
-                    )
-                    break
-
-                except FloodWaitError as e:
-                    if attempt == 1:
-                        logger.exception(
-                            "Gave up uploading %s after flood wait (%s)",
-                            output.name, job.job_id,
-                        )
-                        break
-                    logger.warning(
-                        "Flood wait (%ss) while uploading %s, retrying once",
-                        e.seconds, output.name,
-                    )
-                    await asyncio.sleep(e.seconds + 1)
-
-                except Exception:
-                    # One bad file (too large, corrupted, etc.) must not
-                    # stop the rest of a large batch from being delivered.
-                    logger.exception(
-                        "Failed to upload output file %s for job %s",
-                        output.name, job.job_id,
-                    )
-                    break
-
-            # Free disk as we go: once a file has been uploaded (or we've
-            # given up on it after retries), there's no reason to keep it
-            # around until the whole job finishes — this matters a lot for
-            # archives that produce many/large outputs.
-            for path in (output, entry.thumbnail):
-                if path and path.exists():
-                    try:
-                        path.unlink()
-                    except OSError:
-                        pass
+            await upload_entry(job, entry)
 
             # Small pacing delay to avoid tripping flood limits on jobs
             # that unpack into dozens/hundreds of files (e.g. archives).
