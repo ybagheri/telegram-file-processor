@@ -3,6 +3,8 @@
 ## Done
 
 - [x] Video conversion (multiple quality profiles) with watermark + thumbnail
+- [x] Video thumbnail collage ("contact sheet" grid of frames), configurable count/columns — standalone or combined with a normal conversion/audio extraction
+- [x] Oversized watermark logos are auto-downscaled before use (avoids ffmpeg hangs/slowness on small servers)
 - [x] Video → MP3 / M4A / voice note extraction
 - [x] Audio re-tagging (title, artist, cover)
 - [x] PDF compression (size-threshold based)

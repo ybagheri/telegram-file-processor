@@ -99,6 +99,7 @@ def quality_keyboard(pid: str) -> InlineKeyboardMarkup:
         [InlineKeyboardButton(text="🎵 فقط صدا (mp3)", callback_data=f"q:{pid}:mp3"),
          InlineKeyboardButton(text="🎧 صدا (m4a)", callback_data=f"q:{pid}:m4a")],
         [InlineKeyboardButton(text="🎙 وویس", callback_data=f"q:{pid}:voice")],
+        [InlineKeyboardButton(text="🖼 فقط کولاژ تامبنیل (بدون تبدیل ویدیو)", callback_data=f"q:{pid}:thumbs")],
     ]
     return InlineKeyboardMarkup(inline_keyboard=rows)
 
@@ -108,7 +109,8 @@ def options_keyboard(pid: str) -> InlineKeyboardMarkup:
     o = pending.options
     rows = []
 
-    is_video_output = pending.file_type == "VIDEO" and o.get("quality") not in ("mp3", "m4a", "voice")
+    is_video_output = pending.file_type == "VIDEO" and o.get("quality") not in ("mp3", "m4a", "voice", "thumbs")
+    is_thumbs_only = o.get("quality") == "thumbs"
 
     if is_video_output:
         rows.append([InlineKeyboardButton(
@@ -120,6 +122,24 @@ def options_keyboard(pid: str) -> InlineKeyboardMarkup:
             callback_data=f"o:{pid}:watermark",
         )])
         rows.append([InlineKeyboardButton(text="🖼 تغییر تامبنیل", callback_data=f"o:{pid}:thumb")])
+
+    if pending.file_type == "VIDEO" and not is_thumbs_only:
+        rows.append([InlineKeyboardButton(
+            text=f"🖼 همراه با کولاژ تامبنیل: {'بله ✅' if o.get('make_collage') else 'خیر'}",
+            callback_data=f"o:{pid}:make_collage",
+        )])
+
+    if is_thumbs_only or o.get("make_collage"):
+        count_label = o.get("thumb_count") or "خودکار"
+        columns_label = o.get("thumb_columns") or "خودکار"
+        rows.append([InlineKeyboardButton(
+            text=f"🔢 تعداد عکس‌ها: {count_label}",
+            callback_data=f"o:{pid}:thumb_count",
+        )])
+        rows.append([InlineKeyboardButton(
+            text=f"📐 تعداد ستون: {columns_label}",
+            callback_data=f"o:{pid}:thumb_columns",
+        )])
 
     if pending.file_type == "AUDIO" or o.get("quality") in ("mp3", "m4a", "voice"):
         rows.append([InlineKeyboardButton(text="🎵 عنوان و خواننده", callback_data=f"o:{pid}:title")])
@@ -430,6 +450,12 @@ async def options_action(callback: CallbackQuery):
         await callback.answer()
         return
 
+    if action == "make_collage":
+        pending.options["make_collage"] = not pending.options.get("make_collage")
+        await callback.message.edit_reply_markup(reply_markup=options_keyboard(pid))
+        await callback.answer()
+        return
+
     if action == "thumb":
         awaiting_state[pending.user_id] = f"file:{pid}:thumb"
         await callback.message.answer("تصویر تامبنیل جدید را بفرستید:")
@@ -439,6 +465,22 @@ async def options_action(callback: CallbackQuery):
     if action == "name":
         awaiting_state[pending.user_id] = f"file:{pid}:name"
         await callback.message.answer("نام جدید فایل را بفرستید (بدون پسوند):")
+        await callback.answer()
+        return
+
+    if action == "thumb_count":
+        awaiting_state[pending.user_id] = f"file:{pid}:thumb_count"
+        await callback.message.answer(
+            "چند تا عکس می‌خواهید؟ یک عدد بفرستید (مثلاً 6)، یا «خودکار» برای انتخاب خودکار بر اساس طول ویدیو."
+        )
+        await callback.answer()
+        return
+
+    if action == "thumb_columns":
+        awaiting_state[pending.user_id] = f"file:{pid}:thumb_columns"
+        await callback.message.answer(
+            "عکس‌ها در چند ستون چیده شوند؟ یک عدد بفرستید (مثلاً 3)، یا «خودکار» برای چیدمان نزدیک به مربع."
+        )
         await callback.answer()
         return
 
@@ -699,6 +741,36 @@ async def handle_awaited_input(message: Message, state: str) -> bool:
             await message.answer("✅ نام فایل بروزرسانی شد.", reply_markup=options_keyboard(pid))
             return True
 
+        if field_name == "thumb_count":
+            if not message.text:
+                return False
+            text = message.text.strip()
+            if text in ("خودکار", "auto", "0", "-"):
+                pending.options["thumb_count"] = 0
+            elif text.isdigit() and 1 <= int(text) <= 60:
+                pending.options["thumb_count"] = int(text)
+            else:
+                await message.answer("لطفاً یک عدد بین 1 تا 60 بفرستید، یا «خودکار».")
+                return True
+            awaiting_state.pop(user_id, None)
+            await message.answer("✅ تعداد عکس‌ها بروزرسانی شد.", reply_markup=options_keyboard(pid))
+            return True
+
+        if field_name == "thumb_columns":
+            if not message.text:
+                return False
+            text = message.text.strip()
+            if text in ("خودکار", "auto", "0", "-"):
+                pending.options["thumb_columns"] = 0
+            elif text.isdigit() and 1 <= int(text) <= 20:
+                pending.options["thumb_columns"] = int(text)
+            else:
+                await message.answer("لطفاً یک عدد بین 1 تا 20 بفرستید، یا «خودکار».")
+                return True
+            awaiting_state.pop(user_id, None)
+            await message.answer("✅ تعداد ستون بروزرسانی شد.", reply_markup=options_keyboard(pid))
+            return True
+
         if field_name == "title":
             if not message.text:
                 return False
@@ -902,6 +974,9 @@ async def handle_private_message(message: Message):
             "sort_mode": defaults["sort_mode"],
             "sort_order": defaults["sort_order"],
             "exclude_text": defaults["exclude_text"],
+            "thumb_count": 0,
+            "thumb_columns": 0,
+            "make_collage": False,
         },
     )
 
@@ -944,7 +1019,7 @@ async def handle_bridge_message(message: Message):
 
     if message_type == MessageType.RESULT.value:
 
-        if message.document or message.video or message.audio or message.voice:
+        if message.document or message.video or message.audio or message.voice or message.photo:
 
             # copyMessage keeps the ORIGINAL caption when caption is not
             # given at all, so we must always pass an explicit string here

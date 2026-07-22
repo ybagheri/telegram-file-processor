@@ -32,6 +32,9 @@ async def upload_entry(job, entry) -> bool:
         force_document = False
         voice_note = True
 
+    elif entry.kind == "photo":
+        force_document = False
+
     elif entry.kind == "video":
         force_document = job.options.upload_as != "video"
         if not force_document:

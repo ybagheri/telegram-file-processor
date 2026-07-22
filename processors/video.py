@@ -30,16 +30,31 @@ class VideoProcessor:
 
         quality = (job.options.quality or "").lower()
 
+        if quality == "thumbs":
+            # Collage-only mode: no main conversion at all.
+            return await self.extract_thumbnails(job)
+
         if quality == "mp3":
-            return await self.extract_mp3(job)
+            main_ok = await self.extract_mp3(job)
+        elif quality == "m4a":
+            main_ok = await self.extract_m4a(job)
+        elif quality == "voice":
+            main_ok = await self.extract_voice(job)
+        else:
+            main_ok = await self.convert(job)
 
-        if quality == "m4a":
-            return await self.extract_m4a(job)
+        if job.options.make_collage:
 
-        if quality == "voice":
-            return await self.extract_voice(job)
+            collage_ok = await self.extract_thumbnails(job)
 
-        return await self.convert(job)
+            if main_ok:
+                # The collage is a bonus extra — don't let it failing sink
+                # an otherwise-successful conversion/extraction.
+                job.set_status(JobStatus.COMPLETED)
+
+            return main_ok or collage_ok
+
+        return main_ok
 
     # =====================================================
     # Convert (re-encode + watermark + thumbnail + tags)
@@ -240,5 +255,37 @@ class VideoProcessor:
         job.set_status(JobStatus.COMPLETED)
 
         logger.info("Voice completed (%s)", job.job_id)
+
+        return True
+
+    # =====================================================
+    # Thumbnail collage ("contact sheet"): several frames from across
+    # the video, arranged in a grid, sent as a single image.
+    # =====================================================
+
+    async def extract_thumbnails(self, job):
+
+        output = job.resolve_output_dir() / (job.stem + "_thumbnails.jpg")
+
+        ok = await media_service.generate_contact_sheet(
+            job.input_file,
+            output,
+            count=job.options.thumb_count,
+            columns=job.options.thumb_columns,
+        )
+
+        if not ok:
+            job.set_status(JobStatus.FAILED)
+            return False
+
+        entry = job.add_output(output, kind="photo")
+
+        if entry is None:
+            job.set_status(JobStatus.FAILED)
+            return False
+
+        job.set_status(JobStatus.COMPLETED)
+
+        logger.info("Thumbnail collage completed (%s)", job.job_id)
 
         return True

@@ -60,6 +60,19 @@ class JobOptions:
     exclude_text: str = ""
 
     # ==========================================
+    # Video thumbnail collage ("contact sheet")
+    # ==========================================
+
+    thumb_count: int = 0     # 0 = auto, based on video length
+
+    thumb_columns: int = 0   # 0 = auto (near-square grid)
+
+    make_collage: bool = False  # also produce a collage alongside the
+                                  # main video/audio conversion (quality
+                                  # "thumbs" already means collage-ONLY,
+                                  # this is the "both" combination)
+
+    # ==========================================
     # Rename
     # ==========================================
 
