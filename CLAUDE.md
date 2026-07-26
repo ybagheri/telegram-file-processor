@@ -10,6 +10,7 @@ Read `docs/architecture.md` for the full picture before making non-trivial chang
 
 ## Hard rules
 
+- **Access control is opt-in.** `is_authorized()` in `bot.py` treats an empty `Telegram.ADMIN_IDS` as "no access control configured" — everyone is allowed. Don't change this default; a server with no admin set and access control forced on would lock out the operator with no way to add anyone.
 - **Never assume a caption is safe to leak.** Every message posted to the bridge group carries a JSON payload as its caption/text (`Protocol.encode(...)`) so the other process can read it. When relaying anything from the bridge to an end user (`bot.py`'s `handle_bridge_message`), **always pass an explicit `caption=` override** — `aiogram`'s `copy_message` keeps the *original* caption when `caption=None`/omitted, which means the internal JSON leaks straight to the user if you forget this.
 - **`Job` uses `slots=True`.** You cannot assign a new attribute that isn't declared as a dataclass field — it raises `AttributeError` at runtime, not at import time, so it's easy to miss until it actually executes. If you need a new piece of job-level state, add it as a real field in `core/job.py`.
 - **A single archive `Job` produces many `OutputFile`s of different kinds.** Don't put per-output metadata (kind/title/artist/thumbnail/duration) on the shared `Job` — it gets overwritten as the archive processor walks from file to file, which was a real, hard-to-spot bug. Always attach it to the `OutputFile` entry returned by `job.add_output(...)`.

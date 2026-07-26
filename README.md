@@ -60,6 +60,8 @@ pip install -r requirements.txt
 | `BOT_TOKEN`    | From @BotFather                                            |
 | `GROUP_ID`     | Numeric ID of the private bridge group (bot + user account both members) |
 | `SESSION_NAME` | Any name for the Telethon session file                    |
+| `ADMIN_IDS` | *(optional)* Comma-separated numeric chat IDs of the bot admin(s). Leave empty to let anyone use the bot |
+| `ADMIN_CONTACT_USERNAME` | *(optional)* Shown to unauthorized users so they know who to contact for access, e.g. `@your_admin` |
 
 Run both processes (they're independent — restart either one without affecting the other):
 

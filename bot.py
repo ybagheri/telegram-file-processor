@@ -8,6 +8,7 @@ from aiogram import Dispatcher as AiogramDispatcher, F
 from aiogram.filters import Command
 from aiogram.types import (
     CallbackQuery,
+    FSInputFile,
     InlineKeyboardButton,
     InlineKeyboardMarkup,
     Message,
@@ -17,6 +18,8 @@ from config import Paths, Telegram
 from core.constants import MessageType
 from core.logger import get_logger
 from core.protocol import Protocol
+from services.access_store import access_store
+from services.media import media_service
 from services.settings_store import settings_store
 from services.telegram import telegram_service
 from utils.filetype import FileTypeDetector
@@ -51,6 +54,37 @@ POSITION_GRID = [
 ]
 
 
+# ======================================================================
+# Access control
+# ======================================================================
+
+def is_admin(user_id: int) -> bool:
+    return user_id in Telegram.ADMIN_IDS
+
+
+def is_authorized(user_id: int) -> bool:
+    # If no admin has been configured, access control is effectively off
+    # — otherwise nobody, including the operator, could ever use the bot.
+    if not Telegram.ADMIN_IDS:
+        return True
+    return is_admin(user_id) or access_store.is_authorized(user_id)
+
+
+def not_authorized_text() -> str:
+    contact = Telegram.ADMIN_CONTACT_USERNAME or "مدیر ربات"
+    return (
+        "⛔️ شما هنوز اجازه‌ی استفاده از این ربات را ندارید.\n"
+        f"برای تهیه‌ی اشتراک و فعال‌سازی، به {contact} پیام بدهید."
+    )
+
+
+def admin_panel_keyboard() -> InlineKeyboardMarkup:
+    return InlineKeyboardMarkup(inline_keyboard=[
+        [InlineKeyboardButton(text="➕ افزودن کاربر", callback_data="admin:add_user")],
+        [InlineKeyboardButton(text="📋 لیست کاربران مجاز", callback_data="admin:list_users")],
+    ])
+
+
 def logo_position_keyboard(current: str) -> InlineKeyboardMarkup:
     rows = []
     for grid_row in POSITION_GRID:
@@ -76,8 +110,16 @@ class PendingFile:
     part_message_ids: list = field(default_factory=list)
 
 
+@dataclass
+class PendingPhoto:
+    user_id: int
+    chat_id: int
+    source_message: Message
+
+
 # In-memory state. Fine for a single-process bot; cleared on restart.
 pending_files: dict[str, PendingFile] = {}
+pending_photos: dict[str, PendingPhoto] = {}
 awaiting_state: dict[int, str] = {}  # user_id -> state tag
 
 # job_id -> [(folder_name, message_id_in_destination_chat), ...], used to
@@ -233,6 +275,34 @@ def settings_text_and_keyboard(user_id: int) -> dict:
 
 @dp.message(Command("start"), F.chat.type == "private")
 async def start(message: Message):
+    user = message.from_user
+    user_id = user.id
+
+    if not is_authorized(user_id):
+        # --- اطلاع‌رسانی به ادمین‌ها فقط برای کاربر جدید/غیرمجاز ---
+        name = user.full_name or "—"
+        username = f"@{user.username}" if user.username else "ندارد"
+
+        admin_text = (
+            "👤 یک کاربر جدید ربات را استارت کرد:\n\n"
+            f"نام: {html_escape(name)}\n"
+            f"یوزرنیم: {username}\n"
+            f"آیدی: <code>{user_id}</code>"
+        )
+
+        for admin_id in Telegram.ADMIN_IDS:
+            try:
+                await bot.send_message(
+                    admin_id,
+                    admin_text,
+                    parse_mode="HTML",
+                )
+            except Exception:
+                logger.exception("Failed to notify admin %s about start", admin_id)
+
+        await message.answer(not_authorized_text())
+        return
+
     await message.answer(
         "سلام! فایل خود را ارسال کنید.\n"
         "برای تنظیم مقادیر پیش‌فرض از /settings استفاده کنید."
@@ -241,7 +311,22 @@ async def start(message: Message):
 
 @dp.message(Command("settings"), F.chat.type == "private")
 async def settings_command(message: Message):
+    if not is_authorized(message.from_user.id):
+        await message.answer(not_authorized_text())
+        return
     await message.answer(**settings_text_and_keyboard(message.from_user.id))
+
+
+@dp.message(Command("admin"), F.chat.type == "private")
+async def admin_command(message: Message):
+    if not is_admin(message.from_user.id):
+        await message.answer(not_authorized_text())
+        return
+
+    await message.answer(
+        "⚙️ پنل مدیریت کاربران:",
+        reply_markup=admin_panel_keyboard(),
+    )
 
 
 @dp.message(Command("cancel"), F.chat.type == "private")
@@ -260,6 +345,47 @@ async def cancel_command(message: Message):
         await message.answer("✅ لغو شد. می‌توانید یک فایل جدید بفرستید.")
     else:
         await message.answer("چیزی برای لغو کردن نبود.")
+
+
+# ======================================================================
+# Admin panel callbacks
+# ======================================================================
+
+@dp.callback_query(F.data == "admin:add_user")
+async def admin_add_user(callback: CallbackQuery):
+    if not is_admin(callback.from_user.id):
+        await callback.answer("اجازه‌ی این کار را ندارید.", show_alert=True)
+        return
+
+    awaiting_state[callback.from_user.id] = "admin_add_user"
+    await callback.message.answer(
+        "یک پیام از کاربر مورد نظر برای من فوروارد کنید (فوروارد باید نویسنده را نشان بدهد)، "
+        "یا مستقیماً آیدی عددی کاربر را بفرستید.\n"
+        "برای انصراف /cancel را بفرستید."
+    )
+    await callback.answer()
+
+
+@dp.callback_query(F.data == "admin:list_users")
+async def admin_list_users(callback: CallbackQuery):
+    if not is_admin(callback.from_user.id):
+        await callback.answer("اجازه‌ی این کار را ندارید.", show_alert=True)
+        return
+
+    users = access_store.list_all()
+
+    if not users:
+        await callback.message.answer("هنوز هیچ کاربری اضافه نشده است.")
+        await callback.answer()
+        return
+
+    lines = ["📋 کاربران مجاز:\n"]
+    for uid, info in users.items():
+        label = info.get("label") or "—"
+        lines.append(f"• {uid} ({label})")
+
+    await callback.message.answer("\n".join(lines))
+    await callback.answer()
 
 
 # ======================================================================
@@ -603,6 +729,122 @@ async def finalize_job(callback: CallbackQuery, pending: PendingFile, pid: str):
 
 
 # ======================================================================
+# Plain photo -> watermark flow
+# ======================================================================
+
+def photo_confirm_keyboard(pid: str) -> InlineKeyboardMarkup:
+    return InlineKeyboardMarkup(inline_keyboard=[
+        [InlineKeyboardButton(text="💧 روی این عکس واترمارک بزن", callback_data=f"pw:{pid}:apply")],
+        [InlineKeyboardButton(text="🖼 تغییر لوگوی واترمارک", callback_data=f"pw:{pid}:changelogo")],
+        [InlineKeyboardButton(text="📍 تغییر محل واترمارک", callback_data=f"pw:{pid}:changepos")],
+        [InlineKeyboardButton(text="❌ نه، کاری نکن", callback_data=f"pw:{pid}:cancel")],
+    ])
+
+
+async def handle_incoming_photo(message: Message):
+
+    pid = uuid4().hex[:10]
+
+    pending_photos[pid] = PendingPhoto(
+        user_id=message.from_user.id,
+        chat_id=message.chat.id,
+        source_message=message,
+    )
+
+    await message.answer(
+        "این یک عکسه، نه ویدیو/فایل صوتی/آرشیو. اگر می‌خواهید لوگوی واترمارک را روی همین عکس بزنم، تأیید کنید:",
+        reply_markup=photo_confirm_keyboard(pid),
+    )
+
+
+@dp.callback_query(F.data.startswith("pw:"))
+async def photo_watermark_action(callback: CallbackQuery):
+
+    _, pid, action = callback.data.split(":", 2)
+    pending = pending_photos.get(pid)
+
+    if not pending:
+        await callback.answer("این درخواست منقضی شده است.", show_alert=True)
+        return
+
+    if action == "apply":
+        await callback.message.edit_text("⏳ در حال اعمال واترمارک...")
+        await apply_watermark_to_photo(pid)
+        await callback.answer()
+        return
+
+    if action == "changelogo":
+        awaiting_state[pending.user_id] = "settings_logo"
+        await callback.message.answer(
+            "تصویر لوگوی جدید را به‌صورت عکس بفرستید. بعد از ذخیره، دوباره روی «💧 روی این عکس واترمارک بزن» بزنید."
+        )
+        await callback.answer()
+        return
+
+    if action == "changepos":
+        current = settings_store.get(pending.user_id)["logo_position"]
+        await callback.message.answer(
+            "📍 محل جدید واترمارک را انتخاب کنید. بعد از انتخاب، دوباره روی «💧 روی این عکس واترمارک بزن» بزنید.",
+            reply_markup=logo_position_keyboard(current),
+        )
+        await callback.answer()
+        return
+
+    if action == "cancel":
+        pending_photos.pop(pid, None)
+        await callback.message.edit_text("❌ باشه، کاری روی این عکس انجام نشد.")
+        await callback.answer()
+        return
+
+
+async def apply_watermark_to_photo(pid: str):
+
+    pending = pending_photos.pop(pid, None)
+
+    if not pending:
+        return
+
+    settings = settings_store.get(pending.user_id)
+    logo_path = Path(settings["logo_path"]) if settings.get("logo_path") else Paths.LOGO_FILE
+    position = settings.get("logo_position", "bottom_right")
+
+    if not logo_path.exists():
+        await telegram_service.send_text(
+            pending.user_id,
+            "هنوز هیچ لوگویی برای واترمارک تنظیم نکرده‌اید. اول از /settings یک لوگو تنظیم کنید.",
+        )
+        return
+
+    photo = pending.source_message.photo[-1]
+
+    input_path = Paths.TEMP / f"{pid}_input.jpg"
+    output_path = Paths.TEMP / f"{pid}_watermarked.jpg"
+    input_path.parent.mkdir(parents=True, exist_ok=True)
+
+    try:
+        await bot.download(photo, destination=input_path)
+
+        ok = await media_service.watermark_image(input_path, output_path, logo_path, position)
+
+        if not ok:
+            await telegram_service.send_text(
+                pending.user_id,
+                "متأسفانه اعمال واترمارک روی این عکس با خطا مواجه شد.",
+            )
+            return
+
+        await bot.send_photo(pending.user_id, FSInputFile(output_path))
+
+    finally:
+        for path in (input_path, output_path):
+            if path.exists():
+                try:
+                    path.unlink()
+                except OSError:
+                    pass
+
+
+# ======================================================================
 # Awaited free-text / photo / forward input
 # ======================================================================
 
@@ -652,6 +894,41 @@ async def _resolve_target(message: Message):
 async def handle_awaited_input(message: Message, state: str) -> bool:
 
     user_id = message.from_user.id
+
+    if state == "admin_add_user":
+
+        if not is_admin(user_id):
+            awaiting_state.pop(user_id, None)
+            return False
+
+        target_id = None
+        label = ""
+
+        forwarded_user = getattr(message, "forward_from", None)
+
+        if forwarded_user:
+            target_id = forwarded_user.id
+            label = (
+                getattr(forwarded_user, "full_name", None)
+                or getattr(forwarded_user, "username", None)
+                or ""
+            )
+        elif message.text and message.text.strip().lstrip("-").isdigit():
+            target_id = int(message.text.strip())
+
+        if target_id is None:
+            await message.answer(
+                "نتونستم کاربر را شناسایی کنم. یک پیام از او فوروارد کنید "
+                "(با نمایش نویسنده) یا آیدی عددی‌اش را بفرستید."
+            )
+            return True
+
+        await access_store.add(target_id, label=label, added_by=user_id)
+
+        awaiting_state.pop(user_id, None)
+
+        await message.answer(f"✅ کاربر {label or target_id} به لیست مجاز اضافه شد.")
+        return True
 
     if state == "settings_artist":
         if not message.text:
@@ -912,6 +1189,10 @@ async def handle_private_message(message: Message):
         if handled:
             return
 
+    if not is_authorized(user_id):
+        await message.answer(not_authorized_text())
+        return
+
     # ------------------------------------------------------------
     # Password reply for a pending encrypted archive
     # ------------------------------------------------------------
@@ -938,6 +1219,11 @@ async def handle_private_message(message: Message):
     file = message.document or message.video or message.audio
 
     if not file:
+
+        if message.photo:
+            await handle_incoming_photo(message)
+            return
+
         return
 
     file_name = getattr(file, "file_name", None) or f"file_{message.message_id}"

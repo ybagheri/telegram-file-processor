@@ -94,6 +94,17 @@ class Telegram:
         "worker",
     )
 
+    ADMIN_IDS = [
+        int(x.strip())
+        for x in os.getenv("ADMIN_IDS", "").split(",")
+        if x.strip().lstrip("-").isdigit()
+    ]
+
+    ADMIN_CONTACT_USERNAME = os.getenv(
+        "ADMIN_CONTACT_USERNAME",
+        "",
+    )
+
 
 class FFmpeg:
 

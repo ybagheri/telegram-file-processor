@@ -498,6 +498,68 @@ class MediaService:
 
         return await self._run(command)
 
+    async def watermark_image(
+        self,
+        input_file: Path,
+        output_file: Path,
+        logo_path: Path,
+        position: str = "bottom_right",
+    ) -> bool:
+        """Pastes a logo onto a still image — the photo equivalent of the
+        video watermark. Runs in a thread executor since PIL is
+        synchronous."""
+
+        loop = asyncio.get_event_loop()
+
+        return await loop.run_in_executor(
+            None,
+            self._watermark_image_sync,
+            input_file,
+            output_file,
+            logo_path,
+            position,
+        )
+
+    def _watermark_image_sync(self, input_file, output_file, logo_path, position) -> bool:
+
+        try:
+            from PIL import Image
+
+            base = Image.open(input_file).convert("RGBA")
+
+            logo_safe = self._prepare_logo_sync(logo_path) if hasattr(self, "_prepare_logo_sync") else logo_path
+            logo = Image.open(logo_safe or logo_path).convert("RGBA")
+
+            max_w = max(base.width // 5, 2)
+            max_h = max(base.height // 5, 2)
+            logo.thumbnail((max_w, max_h))
+
+            margin = max(int(min(base.width, base.height) * 0.02), 10)
+
+            positions = {
+                "top_left": (margin, margin),
+                "top_center": ((base.width - logo.width) // 2, margin),
+                "top_right": (base.width - logo.width - margin, margin),
+                "middle_left": (margin, (base.height - logo.height) // 2),
+                "center": ((base.width - logo.width) // 2, (base.height - logo.height) // 2),
+                "middle_right": (base.width - logo.width - margin, (base.height - logo.height) // 2),
+                "bottom_left": (margin, base.height - logo.height - margin),
+                "bottom_center": ((base.width - logo.width) // 2, base.height - logo.height - margin),
+                "bottom_right": (base.width - logo.width - margin, base.height - logo.height - margin),
+            }
+
+            xy = positions.get(position, positions["bottom_right"])
+
+            base.paste(logo, xy, logo)
+
+            base.convert("RGB").save(output_file, quality=92)
+
+            return True
+
+        except Exception:
+            logger.exception(f"Failed to watermark image: {input_file}")
+            return False
+
     async def generate_contact_sheet(
         self,
         input_file: Path,
