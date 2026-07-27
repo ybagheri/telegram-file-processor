@@ -49,3 +49,19 @@ A flat JSON file (`config_data/user_settings.json`) keyed by `user_id`, holding 
 ## Delivery & the caption rule
 
 `bot.py`'s `handle_bridge_message` is the only place that talks to the actual destination chat (the user, or their configured channel/group). Every `copy_message_to(...)` call **must** pass an explicit `caption=` — Telegram's `copyMessage` keeps the original caption when it's omitted, and the "original caption" here is always the bridge's internal JSON. The delivered caption is built as `<filename without extension>` plus, if the user configured one in `/settings`, their fixed caption text appended below it.
+
+## Access control (`services/access_store.py`)
+
+Optional and off by default (see the "opt-in" hard rule in `CLAUDE.md`). When `Telegram.ADMIN_IDS` is non-empty, every non-admin user must have a row in the SQLite table `authorized_users` (`config_data/access.db`) that is both `active` and not expired.
+
+A row is: `user_id`, `label` (display fallback), `name`/`username` (either from a real Telegram forward, or typed by hand by the admin when only a numeric id was given), `added_by`, `added_at`, `expires_at` (Unix timestamp or `NULL` for unlimited), `active` (bool). `AccessStore.is_authorized()` = exists AND active AND (`expires_at` is `NULL` OR in the future).
+
+Three admin-panel flows, each a small state machine over `awaiting_state[admin_id]` (which step) and `admin_flow[admin_id]` (scratch data collected so far — both keyed by the *admin's* id, cleared together on completion or `/cancel`):
+
+- **Add** (`admin:add_user` → duration keyboard → `admin_add_user` state): pick a duration (1 week / 3 months / 6 months / 1 year / unlimited) first, then identify the target by forwarding one of their messages (Telegram supplies name/username automatically) or by typing their numeric id (in which case the bot asks for name/username by hand next, each optional).
+- **Renew** (`admin:renew_user` → `admin_renew_target` state → duration keyboard again, this time with the target id embedded in the callback data): identify an *existing* user, then just replace `expires_at`.
+- **Toggle** (`admin:toggle_user` → `admin_toggle_target` state): identify an existing user and flip `active`, without touching `expires_at` or deleting the row — `set_active(..., False)` disables, `set_active(..., True)` re-enables later with everything else intact.
+
+A user who fails the check gets a specific reason (`not_authorized_text(user_id)`): disabled, expired, or never authorized — not a single generic "no access" message, so they know whether to wait, pay again, or ask for access for the first time.
+
+**Migration note:** the store used to be a single hand-written JSON file. `AccessStore.__init__` still knows how to import that file's contents into SQLite once (only if the table is currently empty) and renames it to `authorized_users.json.migrated` afterward, so upgrading an existing deployment doesn't lose anyone.

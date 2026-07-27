@@ -63,6 +63,8 @@ pip install -r requirements.txt
 | `ADMIN_IDS` | *(optional)* Comma-separated numeric chat IDs of the bot admin(s). Leave empty to let anyone use the bot |
 | `ADMIN_CONTACT_USERNAME` | *(optional)* Shown to unauthorized users so they know who to contact for access, e.g. `@your_admin` |
 
+When `ADMIN_IDS` is set, an admin gets `/admin` — a panel to add a user (choosing how long their access lasts: 1 week / 3 months / 6 months / 1 year / unlimited), renew/change someone's expiry later, or enable/disable a user without losing their record. Users can be identified either by forwarding one of their messages or by typing their numeric id directly (in which case the admin can optionally attach a name/username by hand). This data lives in a small SQLite database (`config_data/access.db`), not a plain file.
+
 Run both processes (they're independent — restart either one without affecting the other):
 
 ```bash
