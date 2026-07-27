@@ -44,7 +44,7 @@ A `Job` is created fresh per bridge `job` message, holds `user_id`, `file_type`,
 
 ## Settings (`services/settings_store.py`)
 
-A flat JSON file (`config_data/user_settings.json`) keyed by `user_id`, holding defaults: quality, watermark on/off + logo path/position, upload-as, delivery target, caption, sort mode/order, and the EXCLUDE filename-cleanup text. `bot.py` copies these into a job's `options` dict when a file is first received, and the per-file inline-keyboard flow can override any of them before the job is sent to the bridge.
+A SQLite table (`config_data/settings.db`, one row per `user_id`) holding defaults: quality, watermark on/off + logo path/position, upload-as, delivery target, caption, sort mode/order, and the EXCLUDE filename-cleanup text. `bot.py` copies these into a job's `options` dict when a file is first received, and the per-file inline-keyboard flow can override any of them before the job is sent to the bridge. Was a flat JSON file (`user_settings.json`) originally; auto-migrated once into the DB on first run (same pattern as `access_store`, see its note below).
 
 ## Delivery & the caption rule
 
