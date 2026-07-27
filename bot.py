@@ -127,12 +127,22 @@ def _extract_target_from_message(message: Message) -> tuple[int | None, str, str
     return None, "", ""
 
 
+def _user_display(target_id: int, info: dict | None) -> str:
+    """Best-effort human-friendly label for a user, for confirmation
+    prompts and result messages — falls back to the raw id if we have
+    nothing else on record."""
+    if info is None:
+        return str(target_id)
+    return info.get("name") or info.get("username") or info.get("label") or str(target_id)
+
+
 def admin_panel_keyboard() -> InlineKeyboardMarkup:
     return InlineKeyboardMarkup(inline_keyboard=[
         [InlineKeyboardButton(text="➕ افزودن کاربر", callback_data="admin:add_user")],
         [InlineKeyboardButton(text="📋 لیست کاربران مجاز", callback_data="admin:list_users")],
         [InlineKeyboardButton(text="⏳ تمدید / تغییر انقضا", callback_data="admin:renew_user")],
         [InlineKeyboardButton(text="🚫 فعال/غیرفعال کردن کاربر", callback_data="admin:toggle_user")],
+        [InlineKeyboardButton(text="🗑 حذف کامل کاربر", callback_data="admin:delete_user")],
     ])
 
 
@@ -146,6 +156,21 @@ def duration_keyboard(purpose: str, target_id: int | None = None) -> InlineKeybo
         )
         rows.append([InlineKeyboardButton(text=label, callback_data=callback_data)])
     return InlineKeyboardMarkup(inline_keyboard=rows)
+
+
+def confirm_keyboard(
+    confirm_data: str,
+    cancel_data: str,
+    confirm_label: str = "✅ بله، انجام بده",
+    cancel_label: str = "❌ انصراف",
+) -> InlineKeyboardMarkup:
+    """Generic yes/no keyboard for anything destructive/hard-to-undo enough
+    to deserve a confirmation step before it actually happens (disabling or
+    deleting a user, so far)."""
+    return InlineKeyboardMarkup(inline_keyboard=[[
+        InlineKeyboardButton(text=confirm_label, callback_data=confirm_data),
+        InlineKeyboardButton(text=cancel_label, callback_data=cancel_data),
+    ]])
 
 
 def logo_position_keyboard(current: str) -> InlineKeyboardMarkup:
@@ -448,6 +473,76 @@ async def admin_toggle_user(callback: CallbackQuery):
         "تا وضعیت فعال/غیرفعال او تغییر کند.\n"
         "برای انصراف /cancel را بفرستید."
     )
+    await callback.answer()
+
+
+@dp.callback_query(F.data == "admin:delete_user")
+async def admin_delete_user(callback: CallbackQuery):
+    if not is_admin(callback.from_user.id):
+        await callback.answer("اجازه‌ی این کار را ندارید.", show_alert=True)
+        return
+
+    awaiting_state[callback.from_user.id] = "admin_delete_target"
+    await callback.message.answer(
+        "یک پیام از کاربر مورد نظر فوروارد کنید یا آیدی عددی‌اش را بفرستید "
+        "تا رکوردش به‌طور کامل حذف شود.\n"
+        "⚠️ این کار غیرقابل بازگشت است (برخلاف غیرفعال‌سازی، چیزی برای بازگردانی باقی نمی‌ماند).\n"
+        "برای انصراف /cancel را بفرستید."
+    )
+    await callback.answer()
+
+
+@dp.callback_query(F.data.startswith("admin:toggle_confirm:"))
+async def admin_toggle_confirmed(callback: CallbackQuery):
+    if not is_admin(callback.from_user.id):
+        await callback.answer("اجازه‌ی این کار را ندارید.", show_alert=True)
+        return
+
+    _, _, target_id_str, new_active_str = callback.data.split(":")
+    target_id = int(target_id_str)
+    new_active = bool(int(new_active_str))
+
+    ok = await access_store.set_active(target_id, new_active)
+    if not ok:
+        await callback.message.answer("این کاربر دیگر در لیست کاربران مجاز نیست.")
+    else:
+        status_text = "فعال ✅" if new_active else "غیرفعال ⛔️"
+        await callback.message.answer(f"وضعیت کاربر {target_id} به «{status_text}» تغییر یافت.")
+    await callback.answer()
+
+
+@dp.callback_query(F.data == "admin:toggle_cancel")
+async def admin_toggle_cancelled(callback: CallbackQuery):
+    if not is_admin(callback.from_user.id):
+        await callback.answer("اجازه‌ی این کار را ندارید.", show_alert=True)
+        return
+    await callback.message.answer("لغو شد؛ وضعیت کاربر تغییری نکرد.")
+    await callback.answer()
+
+
+@dp.callback_query(F.data.startswith("admin:delete_confirm:"))
+async def admin_delete_confirmed(callback: CallbackQuery):
+    if not is_admin(callback.from_user.id):
+        await callback.answer("اجازه‌ی این کار را ندارید.", show_alert=True)
+        return
+
+    target_id = int(callback.data.split(":")[2])
+    display = _user_display(target_id, access_store.get(target_id))
+
+    removed = await access_store.remove(target_id)
+    if removed:
+        await callback.message.answer(f"🗑 رکورد کاربر {display} به‌طور کامل حذف شد.")
+    else:
+        await callback.message.answer("این کاربر دیگر در لیست کاربران مجاز نیست.")
+    await callback.answer()
+
+
+@dp.callback_query(F.data == "admin:delete_cancel")
+async def admin_delete_cancelled(callback: CallbackQuery):
+    if not is_admin(callback.from_user.id):
+        await callback.answer("اجازه‌ی این کار را ندارید.", show_alert=True)
+        return
+    await callback.message.answer("لغو شد؛ کاربر حذف نشد.")
     await callback.answer()
 
 
@@ -1174,11 +1269,51 @@ async def handle_awaited_input(message: Message, state: str) -> bool:
             await message.answer("این کاربر در لیست کاربران مجاز نیست.")
             return True
 
-        new_active = not existing.get("active", True)
-        await access_store.set_active(target_id, new_active)
         awaiting_state.pop(user_id, None)
-        status_text = "فعال ✅" if new_active else "غیرفعال ⛔️"
-        await message.answer(f"وضعیت کاربر {target_id} به «{status_text}» تغییر یافت.")
+        new_active = not existing.get("active", True)
+        display = _user_display(target_id, existing)
+        action_text = "غیرفعال" if not new_active else "فعال"
+        await message.answer(
+            f"آیا مطمئنید می‌خواهید کاربر {display} را {action_text} کنید؟",
+            reply_markup=confirm_keyboard(
+                confirm_data=f"admin:toggle_confirm:{target_id}:{1 if new_active else 0}",
+                cancel_data="admin:toggle_cancel",
+            ),
+        )
+        return True
+
+    if state == "admin_delete_target":
+
+        if not is_admin(user_id):
+            awaiting_state.pop(user_id, None)
+            return False
+
+        target_id, _, _ = _extract_target_from_message(message)
+
+        if target_id is None:
+            await message.answer(
+                "نتونستم کاربر را شناسایی کنم. یک پیام از او فوروارد کنید "
+                "یا آیدی عددی‌اش را بفرستید."
+            )
+            return True
+
+        existing = access_store.get(target_id)
+        if existing is None:
+            awaiting_state.pop(user_id, None)
+            await message.answer("این کاربر در لیست کاربران مجاز نیست.")
+            return True
+
+        awaiting_state.pop(user_id, None)
+        display = _user_display(target_id, existing)
+        await message.answer(
+            f"⚠️ آیا مطمئنید می‌خواهید رکورد کاربر {display} به‌طور کامل حذف شود؟\n"
+            "این کار غیرقابل بازگشت است.",
+            reply_markup=confirm_keyboard(
+                confirm_data=f"admin:delete_confirm:{target_id}",
+                cancel_data="admin:delete_cancel",
+                confirm_label="🗑 بله، حذف کن",
+            ),
+        )
         return True
 
     if state == "settings_artist":

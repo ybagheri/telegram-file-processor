@@ -60,7 +60,10 @@ Three admin-panel flows, each a small state machine over `awaiting_state[admin_i
 
 - **Add** (`admin:add_user` → duration keyboard → `admin_add_user` state): pick a duration (1 week / 3 months / 6 months / 1 year / unlimited) first, then identify the target by forwarding one of their messages (Telegram supplies name/username automatically) or by typing their numeric id (in which case the bot asks for name/username by hand next, each optional).
 - **Renew** (`admin:renew_user` → `admin_renew_target` state → duration keyboard again, this time with the target id embedded in the callback data): identify an *existing* user, then just replace `expires_at`.
-- **Toggle** (`admin:toggle_user` → `admin_toggle_target` state): identify an existing user and flip `active`, without touching `expires_at` or deleting the row — `set_active(..., False)` disables, `set_active(..., True)` re-enables later with everything else intact.
+- **Toggle** (`admin:toggle_user` → `admin_toggle_target` state): identify an existing user; the bot then shows a yes/no `confirm_keyboard` naming the user and the action about to happen, and only flips `active` (`set_active`) once the admin taps confirm (`admin:toggle_confirm:<id>:<0|1>`). Tapping cancel (`admin:toggle_cancel`) leaves the record untouched.
+- **Delete** (`admin:delete_user` → `admin_delete_target` state): identify an existing user, confirm (`admin:delete_confirm:<id>` / `admin:delete_cancel`), then `access_store.remove()` permanently deletes the row — unlike toggle, there's nothing left to restore afterward, which is why it gets its own explicit action instead of being folded into disable.
+
+Confirmation prompts and result messages use `_user_display()` to show a name/username/label instead of a bare numeric id wherever we have something better on file.
 
 A user who fails the check gets a specific reason (`not_authorized_text(user_id)`): disabled, expired, or never authorized — not a single generic "no access" message, so they know whether to wait, pay again, or ask for access for the first time.
 

@@ -8,6 +8,7 @@
 - [x] Optional access control: admin(s) approve users before they can use the bot, with an in-chat panel to add users
 - [x] Access control: duration-based expiry (1 week/3 months/6 months/1 year/unlimited), renewing an existing user's expiry, enabling/disabling a user without deleting their record, manual name/username entry for numeric-id-only additions
 - [x] Access control storage moved from a flat JSON file to SQLite (atomic writes, auto-migration from the old file)
+- [x] Confirmation prompt before disabling a user; a "remove/delete" panel action separate from disable
 - [x] Watermark-only flow for plain photos (not just video)
 - [x] Video → MP3 / M4A / voice note extraction
 - [x] Audio re-tagging (title, artist, cover)
@@ -22,7 +23,6 @@
 
 ## Planned / ideas
 
-- [ ] Confirmation prompt before disabling a user; a real "remove/delete" panel action separate from disable
 - [ ] Periodic near-expiry reminder DM to users about to lose access
 - [ ] Inline per-row renew/disable buttons directly in the "📋 لیست کاربران مجاز" list (skip re-identifying the target each time)
 - [ ] Split `bot.py` into smaller handler modules (admin / settings / file-flow)
