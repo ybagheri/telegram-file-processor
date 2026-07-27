@@ -1,5 +1,7 @@
 import asyncio
+import time
 from dataclasses import dataclass, field
+from datetime import datetime
 from html import escape as html_escape
 from pathlib import Path
 from uuid import uuid4
@@ -70,19 +72,80 @@ def is_authorized(user_id: int) -> bool:
     return is_admin(user_id) or access_store.is_authorized(user_id)
 
 
-def not_authorized_text() -> str:
+def not_authorized_text(user_id: int | None = None) -> str:
     contact = Telegram.ADMIN_CONTACT_USERNAME or "مدیر ربات"
+
+    if user_id is not None:
+        info = access_store.get(user_id)
+        if info is not None:
+            if not info.get("active", True):
+                return (
+                    "⛔️ دسترسی شما توسط مدیر ربات غیرفعال شده است.\n"
+                    f"برای پیگیری به {contact} پیام بدهید."
+                )
+            if access_store.is_expired(info):
+                return (
+                    "⛔️ مدت اعتبار اشتراک شما به پایان رسیده است.\n"
+                    f"برای تمدید، به {contact} پیام بدهید."
+                )
+
     return (
         "⛔️ شما هنوز اجازه‌ی استفاده از این ربات را ندارید.\n"
         f"برای تهیه‌ی اشتراک و فعال‌سازی، به {contact} پیام بدهید."
     )
 
 
+def compute_expiry(days: int) -> float | None:
+    """days == 0 means unlimited (no expiry)."""
+    if not days:
+        return None
+    return time.time() + days * 86400
+
+
+def format_expiry(expires_at: float | None) -> str:
+    if expires_at is None:
+        return "نامحدود"
+    return datetime.fromtimestamp(expires_at).strftime("%Y-%m-%d %H:%M")
+
+
+def _extract_target_from_message(message: Message) -> tuple[int | None, str, str]:
+    """Try to identify a target user from an admin's message: either a
+    forwarded message (author revealed) or a raw numeric user id typed by
+    hand. Returns (user_id, name, username) — name/username are only ever
+    populated when we got them from a real forward; for a manually-typed id
+    they come back empty and the caller should ask for them separately."""
+    forwarded_user = getattr(message, "forward_from", None)
+
+    if forwarded_user:
+        name = getattr(forwarded_user, "full_name", None) or ""
+        username = getattr(forwarded_user, "username", None) or ""
+        return forwarded_user.id, name, username
+
+    if message.text and message.text.strip().lstrip("-").isdigit():
+        return int(message.text.strip()), "", ""
+
+    return None, "", ""
+
+
 def admin_panel_keyboard() -> InlineKeyboardMarkup:
     return InlineKeyboardMarkup(inline_keyboard=[
         [InlineKeyboardButton(text="➕ افزودن کاربر", callback_data="admin:add_user")],
         [InlineKeyboardButton(text="📋 لیست کاربران مجاز", callback_data="admin:list_users")],
+        [InlineKeyboardButton(text="⏳ تمدید / تغییر انقضا", callback_data="admin:renew_user")],
+        [InlineKeyboardButton(text="🚫 فعال/غیرفعال کردن کاربر", callback_data="admin:toggle_user")],
     ])
+
+
+def duration_keyboard(purpose: str, target_id: int | None = None) -> InlineKeyboardMarkup:
+    rows = []
+    for label, days in DURATION_OPTIONS:
+        callback_data = (
+            f"admin:dur:{purpose}:{days}"
+            if target_id is None
+            else f"admin:dur:{purpose}:{days}:{target_id}"
+        )
+        rows.append([InlineKeyboardButton(text=label, callback_data=callback_data)])
+    return InlineKeyboardMarkup(inline_keyboard=rows)
 
 
 def logo_position_keyboard(current: str) -> InlineKeyboardMarkup:
@@ -121,6 +184,21 @@ class PendingPhoto:
 pending_files: dict[str, PendingFile] = {}
 pending_photos: dict[str, PendingPhoto] = {}
 awaiting_state: dict[int, str] = {}  # user_id -> state tag
+
+# Transient scratch space for the multi-step "admin adds/renews a user" flows
+# (chosen duration, manually-typed name/username while we wait for more
+# messages). Keyed by the *admin's* user_id, not the target user's.
+admin_flow: dict[int, dict] = {}
+
+# (label, days) options offered when picking how long a user's access lasts.
+# days == 0 means "no expiry" (unlimited).
+DURATION_OPTIONS = [
+    ("۱ هفته", 7),
+    ("۳ ماهه", 90),
+    ("۶ ماهه", 180),
+    ("۱ ساله", 365),
+    ("نامحدود", 0),
+]
 
 # job_id -> [(folder_name, message_id_in_destination_chat), ...], used to
 # build a linked Table Of Contents once an archive job finishes.
@@ -275,32 +353,10 @@ def settings_text_and_keyboard(user_id: int) -> dict:
 
 @dp.message(Command("start"), F.chat.type == "private")
 async def start(message: Message):
-    user = message.from_user
-    user_id = user.id
+    user_id = message.from_user.id
 
     if not is_authorized(user_id):
-        # --- اطلاع‌رسانی به ادمین‌ها فقط برای کاربر جدید/غیرمجاز ---
-        name = user.full_name or "—"
-        username = f"@{user.username}" if user.username else "ندارد"
-
-        admin_text = (
-            "👤 یک کاربر جدید ربات را استارت کرد:\n\n"
-            f"نام: {html_escape(name)}\n"
-            f"یوزرنیم: {username}\n"
-            f"آیدی: <code>{user_id}</code>"
-        )
-
-        for admin_id in Telegram.ADMIN_IDS:
-            try:
-                await bot.send_message(
-                    admin_id,
-                    admin_text,
-                    parse_mode="HTML",
-                )
-            except Exception:
-                logger.exception("Failed to notify admin %s about start", admin_id)
-
-        await message.answer(not_authorized_text())
+        await message.answer(not_authorized_text(user_id))
         return
 
     await message.answer(
@@ -312,7 +368,7 @@ async def start(message: Message):
 @dp.message(Command("settings"), F.chat.type == "private")
 async def settings_command(message: Message):
     if not is_authorized(message.from_user.id):
-        await message.answer(not_authorized_text())
+        await message.answer(not_authorized_text(message.from_user.id))
         return
     await message.answer(**settings_text_and_keyboard(message.from_user.id))
 
@@ -340,6 +396,7 @@ async def cancel_command(message: Message):
         pending_files.pop(pid, None)
 
     pending_passwords.pop(user_id, None)
+    admin_flow.pop(user_id, None)
 
     if had_state or stale_pids:
         await message.answer("✅ لغو شد. می‌توانید یک فایل جدید بفرستید.")
@@ -357,13 +414,79 @@ async def admin_add_user(callback: CallbackQuery):
         await callback.answer("اجازه‌ی این کار را ندارید.", show_alert=True)
         return
 
-    awaiting_state[callback.from_user.id] = "admin_add_user"
     await callback.message.answer(
-        "یک پیام از کاربر مورد نظر برای من فوروارد کنید (فوروارد باید نویسنده را نشان بدهد)، "
-        "یا مستقیماً آیدی عددی کاربر را بفرستید.\n"
+        "مدت اعتبار دسترسی کاربر جدید را انتخاب کنید:",
+        reply_markup=duration_keyboard("add"),
+    )
+    await callback.answer()
+
+
+@dp.callback_query(F.data == "admin:renew_user")
+async def admin_renew_user(callback: CallbackQuery):
+    if not is_admin(callback.from_user.id):
+        await callback.answer("اجازه‌ی این کار را ندارید.", show_alert=True)
+        return
+
+    awaiting_state[callback.from_user.id] = "admin_renew_target"
+    await callback.message.answer(
+        "یک پیام از کاربر مورد نظر فوروارد کنید یا آیدی عددی‌اش را بفرستید "
+        "تا تاریخ انقضای او را تغییر دهید.\n"
         "برای انصراف /cancel را بفرستید."
     )
     await callback.answer()
+
+
+@dp.callback_query(F.data == "admin:toggle_user")
+async def admin_toggle_user(callback: CallbackQuery):
+    if not is_admin(callback.from_user.id):
+        await callback.answer("اجازه‌ی این کار را ندارید.", show_alert=True)
+        return
+
+    awaiting_state[callback.from_user.id] = "admin_toggle_target"
+    await callback.message.answer(
+        "یک پیام از کاربر مورد نظر فوروارد کنید یا آیدی عددی‌اش را بفرستید "
+        "تا وضعیت فعال/غیرفعال او تغییر کند.\n"
+        "برای انصراف /cancel را بفرستید."
+    )
+    await callback.answer()
+
+
+@dp.callback_query(F.data.startswith("admin:dur:"))
+async def admin_duration_selected(callback: CallbackQuery):
+    if not is_admin(callback.from_user.id):
+        await callback.answer("اجازه‌ی این کار را ندارید.", show_alert=True)
+        return
+
+    admin_id = callback.from_user.id
+    # "admin:dur:<purpose>:<days>" or "admin:dur:<purpose>:<days>:<target_id>"
+    parts = callback.data.split(":")
+    purpose = parts[2]
+    days = int(parts[3])
+
+    if purpose == "add":
+        admin_flow[admin_id] = {"days": days}
+        awaiting_state[admin_id] = "admin_add_user"
+        await callback.message.answer(
+            "یک پیام از کاربر مورد نظر برای من فوروارد کنید (فوروارد باید نویسنده را نشان بدهد)، "
+            "یا مستقیماً آیدی عددی کاربر را بفرستید.\n"
+            "برای انصراف /cancel را بفرستید."
+        )
+        await callback.answer()
+        return
+
+    if purpose == "renew":
+        target_id = int(parts[4])
+        expires_at = compute_expiry(days)
+        existed = await access_store.update_expiry(target_id, expires_at)
+        if not existed:
+            await callback.message.answer("این کاربر دیگر در لیست کاربران مجاز نیست.")
+        else:
+            await callback.message.answer(
+                f"✅ تاریخ انقضای کاربر {target_id} به‌روزرسانی شد.\n"
+                f"⏳ انقضا: {format_expiry(expires_at)}"
+            )
+        await callback.answer()
+        return
 
 
 @dp.callback_query(F.data == "admin:list_users")
@@ -381,8 +504,13 @@ async def admin_list_users(callback: CallbackQuery):
 
     lines = ["📋 کاربران مجاز:\n"]
     for uid, info in users.items():
-        label = info.get("label") or "—"
-        lines.append(f"• {uid} ({label})")
+        label = info.get("label") or info.get("name") or info.get("username") or "—"
+        active = info.get("active", True)
+        status = "✅ فعال" if active and not access_store.is_expired(info) else (
+            "⛔️ منقضی" if active else "⛔️ غیرفعال"
+        )
+        expiry_text = format_expiry(info.get("expires_at"))
+        lines.append(f"• {uid} ({label}) — {status} — انقضا: {expiry_text}")
 
     await callback.message.answer("\n".join(lines))
     await callback.answer()
@@ -899,22 +1027,10 @@ async def handle_awaited_input(message: Message, state: str) -> bool:
 
         if not is_admin(user_id):
             awaiting_state.pop(user_id, None)
+            admin_flow.pop(user_id, None)
             return False
 
-        target_id = None
-        label = ""
-
-        forwarded_user = getattr(message, "forward_from", None)
-
-        if forwarded_user:
-            target_id = forwarded_user.id
-            label = (
-                getattr(forwarded_user, "full_name", None)
-                or getattr(forwarded_user, "username", None)
-                or ""
-            )
-        elif message.text and message.text.strip().lstrip("-").isdigit():
-            target_id = int(message.text.strip())
+        target_id, name, username = _extract_target_from_message(message)
 
         if target_id is None:
             await message.answer(
@@ -923,11 +1039,146 @@ async def handle_awaited_input(message: Message, state: str) -> bool:
             )
             return True
 
-        await access_store.add(target_id, label=label, added_by=user_id)
+        flow = admin_flow.setdefault(user_id, {})
+        days = flow.get("days", 0)
+
+        if name or username:
+            # Real forward — Telegram already gave us name/username, no need
+            # to ask the admin to type them in by hand.
+            expires_at = compute_expiry(days)
+            await access_store.add(
+                target_id,
+                label=(name or username),
+                name=name,
+                username=username,
+                added_by=user_id,
+                expires_at=expires_at,
+            )
+            awaiting_state.pop(user_id, None)
+            admin_flow.pop(user_id, None)
+            await message.answer(
+                f"✅ کاربر {name or username or target_id} به لیست مجاز اضافه شد.\n"
+                f"⏳ انقضا: {format_expiry(expires_at)}"
+            )
+            return True
+
+        # Manually-typed numeric id — Telegram gave us nothing about this
+        # user, so let the admin attach a name/username by hand (either can
+        # be left blank).
+        flow["target_id"] = target_id
+        awaiting_state[user_id] = "admin_add_name"
+        await message.answer(
+            "نام کاربر را وارد کنید (اختیاری؛ برای رد شدن «-» بفرستید):"
+        )
+        return True
+
+    if state == "admin_add_name":
+
+        if not is_admin(user_id):
+            awaiting_state.pop(user_id, None)
+            admin_flow.pop(user_id, None)
+            return False
+
+        if not message.text:
+            await message.answer("لطفاً نام را به‌صورت متن بفرستید، یا «-» برای رد شدن.")
+            return True
+
+        text = message.text.strip()
+        admin_flow.setdefault(user_id, {})["name"] = "" if text in ("-", "خالی") else text
+        awaiting_state[user_id] = "admin_add_username"
+        await message.answer(
+            "یوزرنیم کاربر را وارد کنید (اختیاری؛ برای رد شدن «-» بفرستید):"
+        )
+        return True
+
+    if state == "admin_add_username":
+
+        if not is_admin(user_id):
+            awaiting_state.pop(user_id, None)
+            admin_flow.pop(user_id, None)
+            return False
+
+        if not message.text:
+            await message.answer("لطفاً یوزرنیم را به‌صورت متن بفرستید، یا «-» برای رد شدن.")
+            return True
+
+        text = message.text.strip()
+        username = "" if text in ("-", "خالی") else text.lstrip("@")
+
+        flow = admin_flow.pop(user_id, {})
+        target_id = flow.get("target_id")
+        name = flow.get("name", "")
+        days = flow.get("days", 0)
+        expires_at = compute_expiry(days)
+
+        await access_store.add(
+            target_id,
+            label=(name or username or str(target_id)),
+            name=name,
+            username=username,
+            added_by=user_id,
+            expires_at=expires_at,
+        )
+        awaiting_state.pop(user_id, None)
+        await message.answer(
+            f"✅ کاربر {name or username or target_id} به لیست مجاز اضافه شد.\n"
+            f"⏳ انقضا: {format_expiry(expires_at)}"
+        )
+        return True
+
+    if state == "admin_renew_target":
+
+        if not is_admin(user_id):
+            awaiting_state.pop(user_id, None)
+            return False
+
+        target_id, _, _ = _extract_target_from_message(message)
+
+        if target_id is None:
+            await message.answer(
+                "نتونستم کاربر را شناسایی کنم. یک پیام از او فوروارد کنید "
+                "یا آیدی عددی‌اش را بفرستید."
+            )
+            return True
+
+        if access_store.get(target_id) is None:
+            awaiting_state.pop(user_id, None)
+            await message.answer("این کاربر در لیست کاربران مجاز نیست.")
+            return True
 
         awaiting_state.pop(user_id, None)
+        await message.answer(
+            "مدت اعتبار جدید را انتخاب کنید:",
+            reply_markup=duration_keyboard("renew", target_id),
+        )
+        return True
 
-        await message.answer(f"✅ کاربر {label or target_id} به لیست مجاز اضافه شد.")
+    if state == "admin_toggle_target":
+
+        if not is_admin(user_id):
+            awaiting_state.pop(user_id, None)
+            return False
+
+        target_id, _, _ = _extract_target_from_message(message)
+
+        if target_id is None:
+            await message.answer(
+                "نتونستم کاربر را شناسایی کنم. یک پیام از او فوروارد کنید "
+                "یا آیدی عددی‌اش را بفرستید."
+            )
+            return True
+
+        existing = access_store.get(target_id)
+        if existing is None:
+            awaiting_state.pop(user_id, None)
+            await message.answer("این کاربر در لیست کاربران مجاز نیست.")
+            return True
+
+        new_active = not existing.get("active", True)
+        await access_store.set_active(target_id, new_active)
+        awaiting_state.pop(user_id, None)
+        status_text = "فعال ✅" if new_active else "غیرفعال ⛔️"
+        await message.answer(f"وضعیت کاربر {target_id} به «{status_text}» تغییر یافت.")
         return True
 
     if state == "settings_artist":
@@ -1190,7 +1441,7 @@ async def handle_private_message(message: Message):
             return
 
     if not is_authorized(user_id):
-        await message.answer(not_authorized_text())
+        await message.answer(not_authorized_text(user_id))
         return
 
     # ------------------------------------------------------------
