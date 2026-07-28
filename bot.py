@@ -225,6 +225,11 @@ DURATION_OPTIONS = [
     ("نامحدود", 0),
 ]
 
+# How often the background task checks for users whose access is about to
+# expire, and how far ahead it warns them.
+REMINDER_CHECK_INTERVAL_SECONDS = 6 * 3600   # every 6 hours
+REMINDER_THRESHOLD_SECONDS = 3 * 86400        # warn 3 days before expiry
+
 # job_id -> [(folder_name, message_id_in_destination_chat), ...], used to
 # build a linked Table Of Contents once an archive job finishes.
 job_folder_links: dict[str, list[tuple[str, int]]] = {}
@@ -1795,8 +1800,55 @@ async def handle_bridge_message(message: Message):
         return
 
 
+async def check_and_send_expiry_reminders():
+    """One pass: find users nearing expiry and DM each of them once. Split
+    out from `expiry_reminder_loop` so it can be driven directly (e.g. from
+    tests) without waiting on the sleep loop."""
+    due = access_store.list_expiring_soon(REMINDER_THRESHOLD_SECONDS)
+    for info in due:
+        target_id = info["user_id"]
+        display = _user_display(target_id, info)
+        expiry_text = format_expiry(info["expires_at"])
+
+        try:
+            await bot.send_message(
+                target_id,
+                "⏳ اشتراک شما به‌زودی به پایان می‌رسد.\n"
+                f"تاریخ انقضا: {expiry_text}\n"
+                f"برای تمدید، به {Telegram.ADMIN_CONTACT_USERNAME or 'مدیر ربات'} پیام بدهید.",
+            )
+        except Exception:
+            # User may have blocked the bot, deleted their account, etc.
+            # Not fatal — we still mark them reminded below so a
+            # permanently-unreachable user doesn't get retried every single
+            # cycle forever.
+            logger.warning(
+                "Could not deliver expiry reminder to %s (%s)",
+                target_id, display,
+            )
+
+        await access_store.mark_reminded(target_id, info["expires_at"])
+
+    return due
+
+
+async def expiry_reminder_loop():
+    """Background task: periodically DMs users whose access is about to
+    expire, so they find out ahead of time instead of getting cut off
+    mid-use. Runs forever alongside polling; one failed cycle doesn't kill
+    it, it just logs and tries again next interval."""
+    while True:
+        try:
+            await check_and_send_expiry_reminders()
+        except Exception:
+            logger.exception("Error while checking for users nearing expiry")
+
+        await asyncio.sleep(REMINDER_CHECK_INTERVAL_SECONDS)
+
+
 async def main():
     logger.info("Bot started")
+    asyncio.create_task(expiry_reminder_loop())
     await dp.start_polling(bot)
 
 

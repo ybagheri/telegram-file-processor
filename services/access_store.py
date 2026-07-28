@@ -63,6 +63,21 @@ class AccessStore:
             """
         )
         self._conn.commit()
+        self._migrate_schema()
+
+    def _migrate_schema(self):
+        """Add columns introduced after the table already existed on some
+        deployments. SQLite has no `ADD COLUMN IF NOT EXISTS`, so check
+        `PRAGMA table_info` by hand before altering."""
+        existing_columns = {
+            row["name"]
+            for row in self._conn.execute("PRAGMA table_info(authorized_users)")
+        }
+        if "last_reminder_expiry" not in existing_columns:
+            self._conn.execute(
+                "ALTER TABLE authorized_users ADD COLUMN last_reminder_expiry REAL"
+            )
+            self._conn.commit()
 
     def _migrate_legacy_json(self, legacy_path: Path):
         """One-time import from the old JSON-file store. Only runs if the
@@ -136,6 +151,7 @@ class AccessStore:
             "added_at": row["added_at"],
             "expires_at": row["expires_at"],
             "active": bool(row["active"]),
+            "last_reminder_expiry": row["last_reminder_expiry"],
         }
 
     @staticmethod
@@ -205,15 +221,16 @@ class AccessStore:
             self._conn.execute(
                 """
                 INSERT INTO authorized_users
-                    (user_id, label, name, username, added_by, added_at, expires_at, active)
-                VALUES (?, ?, ?, ?, ?, ?, ?, 1)
+                    (user_id, label, name, username, added_by, added_at, expires_at, active, last_reminder_expiry)
+                VALUES (?, ?, ?, ?, ?, ?, ?, 1, NULL)
                 ON CONFLICT(user_id) DO UPDATE SET
-                    label      = excluded.label,
-                    name       = excluded.name,
-                    username   = excluded.username,
-                    added_by   = excluded.added_by,
-                    expires_at = excluded.expires_at,
-                    active     = 1
+                    label                 = excluded.label,
+                    name                  = excluded.name,
+                    username              = excluded.username,
+                    added_by              = excluded.added_by,
+                    expires_at            = excluded.expires_at,
+                    active                = 1,
+                    last_reminder_expiry  = NULL
                 """,
                 (user_id, label, name, username, added_by, added_at, expires_at),
             )
@@ -221,10 +238,12 @@ class AccessStore:
 
     async def update_expiry(self, user_id: int, expires_at: float | None) -> bool:
         """Update only the expiry date of an existing user. Returns False
-        if the user isn't in the store at all."""
+        if the user isn't in the store at all. Also clears the "already
+        reminded" marker — a fresh expiry deserves its own reminder cycle,
+        not silence because we warned about the *previous* one."""
         async with self._lock:
             cur = self._conn.execute(
-                "UPDATE authorized_users SET expires_at = ? WHERE user_id = ?",
+                "UPDATE authorized_users SET expires_at = ?, last_reminder_expiry = NULL WHERE user_id = ?",
                 (expires_at, user_id),
             )
             self._conn.commit()
@@ -253,6 +272,46 @@ class AccessStore:
             )
             self._conn.commit()
             return cur.rowcount > 0
+
+    # ------------------------------------------------------------
+    # Expiry reminders
+    # ------------------------------------------------------------
+
+    def list_expiring_soon(self, within_seconds: float) -> list[dict]:
+        """Active users whose access expires within `within_seconds` from
+        now (and hasn't already expired), who haven't already been
+        reminded about *this specific* expiry date. Each dict includes
+        `user_id` alongside the usual fields."""
+        now = time.time()
+        rows = self._conn.execute(
+            """
+            SELECT * FROM authorized_users
+            WHERE active = 1
+              AND expires_at IS NOT NULL
+              AND expires_at > ?
+              AND expires_at <= ?
+              AND (last_reminder_expiry IS NULL OR last_reminder_expiry != expires_at)
+            """,
+            (now, now + within_seconds),
+        ).fetchall()
+
+        results = []
+        for row in rows:
+            info = self._row_to_dict(row)
+            info["user_id"] = row["user_id"]
+            results.append(info)
+        return results
+
+    async def mark_reminded(self, user_id: int, expires_at: float) -> None:
+        """Record that we've already sent a reminder for this user's
+        *current* expiry, so `list_expiring_soon` won't nag them again
+        until it changes (renewal resets this via `update_expiry`/`add`)."""
+        async with self._lock:
+            self._conn.execute(
+                "UPDATE authorized_users SET last_reminder_expiry = ? WHERE user_id = ?",
+                (expires_at, user_id),
+            )
+            self._conn.commit()
 
 
 access_store = AccessStore(DB_FILE, LEGACY_JSON_FILE)
