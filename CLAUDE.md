@@ -47,12 +47,16 @@ Read `docs/architecture.md` for the full picture before making non-trivial chang
 | Archive extraction, folder walk, audio/PDF pairing, TOC | `processors/archive.py` |
 | The bridge wire format                            | `core/protocol.py`, `core/constants.py` |
 | Delivery (who gets what, caption building, TOC)   | `bot.py` (`handle_bridge_message`) |
-| Who's allowed to use the bot, add/renew/disable/delete a user | `services/access_store.py` (SQLite), `bot.py` (`admin:*` callbacks, `admin_add_user`/`admin_add_name`/`admin_add_username`/`admin_renew_target`/`admin_toggle_target`/`admin_delete_target` states, `confirm_keyboard`) |
+| Who's allowed to use the bot, add/renew/disable/delete a user | `services/access_store.py` (SQLite), `bot.py` (`admin:*` callbacks, `admin_add_user`/`admin_add_name`/`admin_add_username`/`admin_renew_target`/`admin_toggle_target`/`admin_delete_target` states, `admin:manage*` callbacks, `confirm_keyboard`) |
 | Near-expiry reminder DMs                          | `bot.py` (`expiry_reminder_loop`, `check_and_send_expiry_reminders`), `access_store.list_expiring_soon`/`mark_reminded` |
 
 ## Change log
 
 Dated entries for anything user-facing or architecturally significant, newest first. Keep this updated when you make a non-trivial change — it's how the next session (human or AI) knows what already happened without re-reading every diff.
+
+- **2026-07-28 (phase 4) — Inline per-user renew/disable/delete buttons directly in "📋 لیست کاربران مجاز".**
+  Each row in the user list now has an "⚙️ manage" button (`admin:manage:<id>`) that opens a per-user submenu (current status + expiry, then ⏳ renew / 🚫✅ toggle / 🗑 delete / 🔙 back) *without* the admin needing to forward a message or type the numeric id again — the target is already known from the button's callback data. `admin_manage_renew`/`admin_manage_toggle`/`admin_manage_delete` just jump straight to the existing `duration_keyboard("renew", target_id)` / `confirm_keyboard(...)` steps used by the original identify-by-forward flows, so toggle/delete still always go through a confirmation before anything happens — no new destructive-action code path was introduced, this only adds a shortcut to the existing ones. The original "🚫 فعال/غیرفعال کردن کاربر" / "🗑 حذف کامل کاربر" panel buttons (identify by forward/id) are unchanged and still there for when the admin doesn't want to open the full list.
+  Planned next: splitting `bot.py` into smaller handler modules; a small pytest suite for the pure-logic modules.
 
 - **2026-07-28 (phase 3) — Near-expiry reminder DM, plus a SQL-injection audit of the SQLite migration.**
   New background task `expiry_reminder_loop()` in `bot.py` (started from `main()` alongside polling) checks every `REMINDER_CHECK_INTERVAL_SECONDS` (6h) for active users whose access expires within `REMINDER_THRESHOLD_SECONDS` (3 days) and DMs each one once. `access_store` gained a `last_reminder_expiry` column (added via a `PRAGMA table_info` + `ALTER TABLE` check in `_migrate_schema()`, so existing deployments upgrade in place) plus `list_expiring_soon()`/`mark_reminded()`; renewing a user's expiry (`update_expiry`) or re-adding them (`add`) resets that marker so they get a fresh reminder cycle for the *new* date rather than staying silently suppressed. A user who's blocked the bot still gets marked reminded (logged, not retried every cycle) instead of erroring the whole pass. The single-pass logic is split into `check_and_send_expiry_reminders()` specifically so it's testable without waiting on the sleep loop.

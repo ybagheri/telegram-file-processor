@@ -11,6 +11,7 @@
 - [x] Per-user `/settings` storage also moved from a flat JSON file to SQLite (same reasoning, same auto-migration pattern)
 - [x] Confirmation prompt before disabling a user; a "remove/delete" panel action separate from disable
 - [x] Periodic near-expiry reminder DM to users about to lose access
+- [x] Inline per-row renew/disable/delete buttons directly in the "📋 لیست کاربران مجاز" list
 - [x] Watermark-only flow for plain photos (not just video)
 - [x] Video → MP3 / M4A / voice note extraction
 - [x] Audio re-tagging (title, artist, cover)
@@ -25,7 +26,6 @@
 
 ## Planned / ideas
 
-- [ ] Inline per-row renew/disable buttons directly in the "📋 لیست کاربران مجاز" list (skip re-identifying the target each time)
 - [ ] Split `bot.py` into smaller handler modules (admin / settings / file-flow)
 - [ ] Small pytest suite for the pure-logic modules (`access_store`, `core/protocol.py`, `core/job_options.py`)
 - [ ] Multiple saved delivery targets per user (currently one "custom" target at a time)

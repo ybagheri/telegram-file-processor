@@ -67,6 +67,8 @@ Confirmation prompts and result messages use `_user_display()` to show a name/us
 
 A user who fails the check gets a specific reason (`not_authorized_text(user_id)`): disabled, expired, or never authorized — not a single generic "no access" message, so they know whether to wait, pay again, or ask for access for the first time.
 
+**Quick actions from the list:** "📋 لیست کاربران مجاز" also renders one "⚙️ manage" button per user (`admin:manage:<id>`). Tapping it opens a small submenu (current status/expiry + renew/toggle/delete/back) that already knows the target id, so it skips straight to `duration_keyboard`/`confirm_keyboard` instead of asking the admin to forward a message or type the id again — it's a shortcut into the exact same renew/toggle/delete code paths described above, not a separate one.
+
 **Migration note:** the store used to be a single hand-written JSON file. `AccessStore.__init__` still knows how to import that file's contents into SQLite once (only if the table is currently empty) and renames it to `authorized_users.json.migrated` afterward, so upgrading an existing deployment doesn't lose anyone.
 
 **Expiry reminders:** a background task (`bot.py`'s `expiry_reminder_loop`, started from `main()`) wakes up every few hours, asks `access_store.list_expiring_soon(threshold)` for active users expiring within the threshold who haven't already been reminded *for that specific expiry*, and DMs each one. `mark_reminded()` records which `expires_at` a reminder was sent for; `update_expiry`/`add` clear that marker so renewing someone re-arms their next reminder instead of leaving them silently un-warned. A user who's blocked the bot is still marked reminded (just logged) rather than retried forever.

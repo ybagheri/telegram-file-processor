@@ -603,6 +603,7 @@ async def admin_list_users(callback: CallbackQuery):
         return
 
     lines = ["📋 کاربران مجاز:\n"]
+    rows = []
     for uid, info in users.items():
         label = info.get("label") or info.get("name") or info.get("username") or "—"
         active = info.get("active", True)
@@ -612,7 +613,128 @@ async def admin_list_users(callback: CallbackQuery):
         expiry_text = format_expiry(info.get("expires_at"))
         lines.append(f"• {uid} ({label}) — {status} — انقضا: {expiry_text}")
 
-    await callback.message.answer("\n".join(lines))
+        button_label = label if len(label) <= 24 else label[:23] + "…"
+        rows.append([InlineKeyboardButton(
+            text=f"⚙️ {button_label} ({uid})",
+            callback_data=f"admin:manage:{uid}",
+        )])
+
+    lines.append("\nبرای تمدید/غیرفعال‌سازی/حذف سریع، روی هرکدوم از دکمه‌های زیر بزنید:")
+
+    await callback.message.answer(
+        "\n".join(lines),
+        reply_markup=InlineKeyboardMarkup(inline_keyboard=rows),
+    )
+    await callback.answer()
+
+
+@dp.callback_query(F.data.startswith("admin:manage:"))
+async def admin_manage_user(callback: CallbackQuery):
+    if not is_admin(callback.from_user.id):
+        await callback.answer("اجازه‌ی این کار را ندارید.", show_alert=True)
+        return
+
+    target_id = int(callback.data.split(":")[2])
+    info = access_store.get(target_id)
+
+    if info is None:
+        await callback.message.answer("این کاربر دیگر در لیست کاربران مجاز نیست.")
+        await callback.answer()
+        return
+
+    display = _user_display(target_id, info)
+    status = "✅ فعال" if info["active"] and not access_store.is_expired(info) else (
+        "⛔️ منقضی" if info["active"] else "⛔️ غیرفعال"
+    )
+    expiry_text = format_expiry(info["expires_at"])
+    toggle_label = "🚫 غیرفعال کردن" if info["active"] else "✅ فعال کردن"
+
+    text = (
+        f"⚙️ مدیریت کاربر {display} ({target_id})\n"
+        f"وضعیت: {status}\n"
+        f"انقضا: {expiry_text}"
+    )
+    keyboard = InlineKeyboardMarkup(inline_keyboard=[
+        [InlineKeyboardButton(text="⏳ تمدید / تغییر انقضا", callback_data=f"admin:manage_renew:{target_id}")],
+        [InlineKeyboardButton(text=toggle_label, callback_data=f"admin:manage_toggle:{target_id}")],
+        [InlineKeyboardButton(text="🗑 حذف کامل", callback_data=f"admin:manage_delete:{target_id}")],
+        [InlineKeyboardButton(text="🔙 بازگشت به لیست", callback_data="admin:list_users")],
+    ])
+    await callback.message.answer(text, reply_markup=keyboard)
+    await callback.answer()
+
+
+@dp.callback_query(F.data.startswith("admin:manage_renew:"))
+async def admin_manage_renew(callback: CallbackQuery):
+    if not is_admin(callback.from_user.id):
+        await callback.answer("اجازه‌ی این کار را ندارید.", show_alert=True)
+        return
+
+    target_id = int(callback.data.split(":")[2])
+    if access_store.get(target_id) is None:
+        await callback.message.answer("این کاربر دیگر در لیست کاربران مجاز نیست.")
+        await callback.answer()
+        return
+
+    await callback.message.answer(
+        "مدت اعتبار جدید را انتخاب کنید:",
+        reply_markup=duration_keyboard("renew", target_id),
+    )
+    await callback.answer()
+
+
+@dp.callback_query(F.data.startswith("admin:manage_toggle:"))
+async def admin_manage_toggle(callback: CallbackQuery):
+    if not is_admin(callback.from_user.id):
+        await callback.answer("اجازه‌ی این کار را ندارید.", show_alert=True)
+        return
+
+    target_id = int(callback.data.split(":")[2])
+    existing = access_store.get(target_id)
+
+    if existing is None:
+        await callback.message.answer("این کاربر دیگر در لیست کاربران مجاز نیست.")
+        await callback.answer()
+        return
+
+    new_active = not existing.get("active", True)
+    display = _user_display(target_id, existing)
+    action_text = "غیرفعال" if not new_active else "فعال"
+
+    await callback.message.answer(
+        f"آیا مطمئنید می‌خواهید کاربر {display} را {action_text} کنید؟",
+        reply_markup=confirm_keyboard(
+            confirm_data=f"admin:toggle_confirm:{target_id}:{1 if new_active else 0}",
+            cancel_data="admin:toggle_cancel",
+        ),
+    )
+    await callback.answer()
+
+
+@dp.callback_query(F.data.startswith("admin:manage_delete:"))
+async def admin_manage_delete(callback: CallbackQuery):
+    if not is_admin(callback.from_user.id):
+        await callback.answer("اجازه‌ی این کار را ندارید.", show_alert=True)
+        return
+
+    target_id = int(callback.data.split(":")[2])
+    existing = access_store.get(target_id)
+
+    if existing is None:
+        await callback.message.answer("این کاربر دیگر در لیست کاربران مجاز نیست.")
+        await callback.answer()
+        return
+
+    display = _user_display(target_id, existing)
+    await callback.message.answer(
+        f"⚠️ آیا مطمئنید می‌خواهید رکورد کاربر {display} به‌طور کامل حذف شود؟\n"
+        "این کار غیرقابل بازگشت است.",
+        reply_markup=confirm_keyboard(
+            confirm_data=f"admin:delete_confirm:{target_id}",
+            cancel_data="admin:delete_cancel",
+            confirm_label="🗑 بله، حذف کن",
+        ),
+    )
     await callback.answer()
 
 
