@@ -12,6 +12,7 @@
 - [x] Confirmation prompt before disabling a user; a "remove/delete" panel action separate from disable
 - [x] Periodic near-expiry reminder DM to users about to lose access
 - [x] Inline per-row renew/disable/delete buttons directly in the "📋 لیست کاربران مجاز" list
+- [x] Small pytest suite for the pure-logic modules (`access_store`, `settings_store`, `core/protocol.py`, `core/job_options.py`) — see `tests/`
 - [x] Watermark-only flow for plain photos (not just video)
 - [x] Video → MP3 / M4A / voice note extraction
 - [x] Audio re-tagging (title, artist, cover)
@@ -26,8 +27,7 @@
 
 ## Planned / ideas
 
-- [ ] Split `bot.py` into smaller handler modules (admin / settings / file-flow)
-- [ ] Small pytest suite for the pure-logic modules (`access_store`, `core/protocol.py`, `core/job_options.py`)
+- [ ] Split `bot.py` into smaller handler modules (admin / settings / file-flow) — deliberately deferred as its own phase; see the phase 5a change-log entry in `CLAUDE.md` for why
 - [ ] Multiple saved delivery targets per user (currently one "custom" target at a time)
 - [ ] Image processing (resize/compress/watermark) as its own processor
 - [ ] OCR for scanned PDFs

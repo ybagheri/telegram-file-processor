@@ -13,8 +13,17 @@ pip install -r requirements.txt
 
 1. Fork the repo and branch off `main`.
 2. Make your change.
-3. Sanity-check it manually (see `CLAUDE.md` for the gotchas that have bitten this project before — please read it before touching `core/job.py`, `core/protocol.py`, or anything in `processors/archive.py`).
+3. Run the test suite (`tests/` — pure-logic modules only: `access_store`, `settings_store`, `core/protocol.py`, `core/job_options.py`; no live Telegram involved) and sanity-check the rest manually (see `CLAUDE.md` for the gotchas that have bitten this project before — please read it before touching `core/job.py`, `core/protocol.py`, or anything in `processors/archive.py`).
 4. Open a PR describing what changed and why.
+
+## Running the tests
+
+```bash
+pip install -r requirements-dev.txt
+pytest
+```
+
+These only cover code with no Telegram/ffmpeg/filesystem side effects — everything in `bot.py`/`worker.py` and the processors still needs manual verification, there's no live-bot test harness.
 
 ## Coding style
 

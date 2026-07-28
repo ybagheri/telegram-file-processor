@@ -35,16 +35,6 @@ config_data/
 *.log
 
 # ====================
-# SQLite database files
-# ====================
-*.db
-*.sqlite
-*.sqlite3
-*.db-journal
-*.db-wal
-*.db-shm
-
-# ====================
 # Debug & Test Files
 # (leading slash: only matches these at the repo root — NOT tests/test_*.py)
 # ====================

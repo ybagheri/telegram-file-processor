@@ -1,0 +1,4 @@
+# Only needed to run the test suite (tests/) — not required to run the bot
+# itself, so this stays out of requirements.txt.
+pytest
+pytest-asyncio
