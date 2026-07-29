@@ -13,6 +13,7 @@
 - [x] Periodic near-expiry reminder DM to users about to lose access
 - [x] Inline per-row renew/disable/delete buttons directly in the "📋 لیست کاربران مجاز" list
 - [x] Small pytest suite for the pure-logic modules (`access_store`, `settings_store`, `core/protocol.py`, `core/job_options.py`) — see `tests/`
+- [x] Live end-to-end QA tool: a real Telegram user account that sends test media to the actual bot and clicks through its keyboards — see `qa-userbot/` (run by you, not from this sandbox)
 - [x] Watermark-only flow for plain photos (not just video)
 - [x] Video → MP3 / M4A / voice note extraction
 - [x] Audio re-tagging (title, artist, cover)
