@@ -22,6 +22,7 @@ from core.logger import get_logger
 from core.protocol import Protocol
 from services.access_store import access_store
 from services.media import media_service
+from services.pending_user_store import pending_user_store
 from services.settings_store import settings_store
 from services.telegram import telegram_service
 from utils.filetype import FileTypeDetector
@@ -134,6 +135,29 @@ def _user_display(target_id: int, info: dict | None) -> str:
     if info is None:
         return str(target_id)
     return info.get("name") or info.get("username") or info.get("label") or str(target_id)
+
+
+async def notify_admins_of_new_pending_user(tg_user):
+    """DM every configured admin once, the first time someone `/start`s
+    the bot without being registered in `access_store` yet — so the admin
+    finds out about interested users without having to check anything."""
+    full_name = (tg_user.full_name or "").strip() or "—"
+    username = f"@{tg_user.username}" if tg_user.username else "ندارد"
+    when = datetime.fromtimestamp(time.time()).strftime("%Y-%m-%d %H:%M")
+
+    text = (
+        "🆕 کاربر جدید ربات\n\n"
+        f"👤 نام:\n{full_name}\n\n"
+        f"🔹 یوزرنیم:\n{username}\n\n"
+        f"🆔 Telegram ID:\n{tg_user.id}\n\n"
+        f"⏰ زمان:\n{when}"
+    )
+
+    for admin_id in Telegram.ADMIN_IDS:
+        try:
+            await bot.send_message(admin_id, text)
+        except Exception:
+            logger.warning("Could not notify admin %s about new pending user %s", admin_id, tg_user.id)
 
 
 def admin_panel_keyboard() -> InlineKeyboardMarkup:
@@ -384,6 +408,23 @@ def settings_text_and_keyboard(user_id: int) -> dict:
 @dp.message(Command("start"), F.chat.type == "private")
 async def start(message: Message):
     user_id = message.from_user.id
+
+    # Track anyone who /start-s without being in access_store yet, so the
+    # admin can see who's shown interest (and can be told about it once,
+    # not on every repeat /start) — see CLAUDE.md's change log for why.
+    if not is_admin(user_id) and access_store.get(user_id) is None:
+        tg_user = message.from_user
+        is_new_pending = await pending_user_store.record_start(
+            user_id,
+            first_name=tg_user.first_name or "",
+            last_name=tg_user.last_name or "",
+            username=tg_user.username or "",
+            language_code=tg_user.language_code or "",
+            is_bot=tg_user.is_bot or False,
+        )
+        if is_new_pending:
+            await notify_admins_of_new_pending_user(tg_user)
+            await pending_user_store.mark_notified(user_id)
 
     if not is_authorized(user_id):
         await message.answer(not_authorized_text(user_id))
@@ -1276,6 +1317,7 @@ async def handle_awaited_input(message: Message, state: str) -> bool:
                 added_by=user_id,
                 expires_at=expires_at,
             )
+            await pending_user_store.remove(target_id)
             awaiting_state.pop(user_id, None)
             admin_flow.pop(user_id, None)
             await message.answer(
@@ -1341,6 +1383,7 @@ async def handle_awaited_input(message: Message, state: str) -> bool:
             added_by=user_id,
             expires_at=expires_at,
         )
+        await pending_user_store.remove(target_id)
         awaiting_state.pop(user_id, None)
         await message.answer(
             f"✅ کاربر {name or username or target_id} به لیست مجاز اضافه شد.\n"
