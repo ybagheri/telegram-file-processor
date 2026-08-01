@@ -1,12 +1,9 @@
 import asyncio
-import time
-from dataclasses import dataclass, field
-from datetime import datetime
 from html import escape as html_escape
 from pathlib import Path
 from uuid import uuid4
 
-from aiogram import Dispatcher as AiogramDispatcher, F
+from aiogram import Dispatcher as AiogramDispatcher, F, Router
 from aiogram.filters import Command
 from aiogram.types import (
     CallbackQuery,
@@ -36,35 +33,60 @@ from utils.access_control import (
     _user_display,
     notify_admins_of_new_pending_user,
 )
+from keyboards.constants import (
+    QUALITY_LABELS,
+    POSITION_ICONS,
+    POSITION_LABELS_FA,
+    POSITION_GRID,
+    DURATION_OPTIONS,
+)
+from keyboards.admin import admin_panel_keyboard, duration_keyboard, confirm_keyboard
+from keyboards.settings import logo_position_keyboard, settings_text_and_keyboard
+from keyboards.files import quality_keyboard, options_keyboard, target_keyboard
+from keyboards.photo import photo_confirm_keyboard
+from handlers.admin import (
+    router as admin_router,
+    admin_command,
+    admin_add_user,
+    admin_renew_user,
+    admin_toggle_user,
+    admin_delete_user,
+    admin_toggle_confirmed,
+    admin_toggle_cancelled,
+    admin_delete_confirmed,
+    admin_delete_cancelled,
+    admin_duration_selected,
+    admin_list_users,
+    admin_manage_user,
+    admin_manage_renew,
+    admin_manage_toggle,
+    admin_manage_delete,
+    handle_admin_awaited_input,
+)
 
 logger = get_logger(__name__)
 
 bot = telegram_service.bot
 dp = AiogramDispatcher()
+dp.include_router(admin_router)
 
-QUALITY_LABELS = {
-    "144": "144p", "240": "240p", "360": "360p",
-    "480": "480p", "720": "720p",
-    "mp3": "🎵 فقط صدا (mp3)", "m4a": "🎧 صدا (m4a)", "voice": "🎙 وویس",
-}
-
-POSITION_ICONS = {
-    "top_left": "↖️", "top_center": "⬆️", "top_right": "↗️",
-    "middle_left": "⬅️", "center": "⏺", "middle_right": "➡️",
-    "bottom_left": "↙️", "bottom_center": "⬇️", "bottom_right": "↘️",
-}
-
-POSITION_LABELS_FA = {
-    "top_left": "بالا چپ", "top_center": "بالا وسط", "top_right": "بالا راست",
-    "middle_left": "وسط چپ", "center": "مرکز", "middle_right": "وسط راست",
-    "bottom_left": "پایین چپ", "bottom_center": "پایین وسط", "bottom_right": "پایین راست",
-}
-
-POSITION_GRID = [
-    ["top_left", "top_center", "top_right"],
-    ["middle_left", "center", "middle_right"],
-    ["bottom_left", "bottom_center", "bottom_right"],
-]
+# IMPORTANT: aiogram checks a router's OWN directly-decorated handlers
+# before descending into any included sub-router, REGARDLESS of when
+# dp.include_router(...) was called relative to when those own handlers
+# were defined. handle_private_message's filter below is a bare
+# "F.chat.type == 'private'" catch-all with no further discrimination —
+# if it were registered directly on `dp` (as it originally was, before
+# the admin router existed), it would swallow "/admin" and every other
+# private message BEFORE admin_router's Command("admin")/callback filters
+# ever got a chance, since dp's own handlers always win over sub-routers.
+# Putting it on its own router instead, included *after* admin_router,
+# makes ordinary sub-router-vs-sub-router inclusion order apply (verified
+# empirically — see the phase-D entry in CLAUDE.md's change log for the
+# regression this was actually caught fixing). Any future router with a
+# specific filter must be included before this one; this one should
+# always be included last.
+catchall_router = Router(name="catchall")
+dp.include_router(catchall_router)
 
 
 # ======================================================================
@@ -74,247 +96,44 @@ POSITION_GRID = [
 # CLAUDE.md's change log. Imported above so every existing call site in
 # this file — is_admin(...), is_authorized(...), etc. — keeps working
 # unchanged.)
+#
+# The admin/settings-panel keyboards that used to live here (admin_panel_keyboard,
+# duration_keyboard, confirm_keyboard, logo_position_keyboard) moved to
+# keyboards/admin.py and keyboards/settings.py — phase B of the module
+# split (see CLAUDE.md's change log). Imported above.
 
 
-def admin_panel_keyboard() -> InlineKeyboardMarkup:
-    return InlineKeyboardMarkup(inline_keyboard=[
-        [InlineKeyboardButton(text="➕ افزودن کاربر", callback_data="admin:add_user")],
-        [InlineKeyboardButton(text="📋 لیست کاربران مجاز", callback_data="admin:list_users")],
-        [InlineKeyboardButton(text="⏳ تمدید / تغییر انقضا", callback_data="admin:renew_user")],
-        [InlineKeyboardButton(text="🚫 فعال/غیرفعال کردن کاربر", callback_data="admin:toggle_user")],
-        [InlineKeyboardButton(text="🗑 حذف کامل کاربر", callback_data="admin:delete_user")],
-    ])
+from models.pending_file import PendingFile
+from models.pending_photo import PendingPhoto
+from state import (
+    pending_files,
+    pending_photos,
+    awaiting_state,
+    admin_flow,
+    pending_passwords,
+    job_folder_links,
+)
 
-
-def duration_keyboard(purpose: str, target_id: int | None = None) -> InlineKeyboardMarkup:
-    rows = []
-    for label, days in DURATION_OPTIONS:
-        callback_data = (
-            f"admin:dur:{purpose}:{days}"
-            if target_id is None
-            else f"admin:dur:{purpose}:{days}:{target_id}"
-        )
-        rows.append([InlineKeyboardButton(text=label, callback_data=callback_data)])
-    return InlineKeyboardMarkup(inline_keyboard=rows)
-
-
-def confirm_keyboard(
-    confirm_data: str,
-    cancel_data: str,
-    confirm_label: str = "✅ بله، انجام بده",
-    cancel_label: str = "❌ انصراف",
-) -> InlineKeyboardMarkup:
-    """Generic yes/no keyboard for anything destructive/hard-to-undo enough
-    to deserve a confirmation step before it actually happens (disabling or
-    deleting a user, so far)."""
-    return InlineKeyboardMarkup(inline_keyboard=[[
-        InlineKeyboardButton(text=confirm_label, callback_data=confirm_data),
-        InlineKeyboardButton(text=cancel_label, callback_data=cancel_data),
-    ]])
-
-
-def logo_position_keyboard(current: str) -> InlineKeyboardMarkup:
-    rows = []
-    for grid_row in POSITION_GRID:
-        row = []
-        for pos in grid_row:
-            icon = POSITION_ICONS[pos]
-            text = f"✅{icon}" if pos == current else icon
-            row.append(InlineKeyboardButton(text=text, callback_data=f"slogopos:{pos}"))
-        rows.append(row)
-    return InlineKeyboardMarkup(inline_keyboard=rows)
-
-
-@dataclass
-class PendingFile:
-    user_id: int
-    chat_id: int
-    file_name: str
-    file_type: str
-    source_message: Message
-    options: dict = field(default_factory=dict)
-    is_multipart: bool = False
-    parts_total: int = 0
-    part_message_ids: list = field(default_factory=list)
-
-
-@dataclass
-class PendingPhoto:
-    user_id: int
-    chat_id: int
-    source_message: Message
-
-
-# In-memory state. Fine for a single-process bot; cleared on restart.
-pending_files: dict[str, PendingFile] = {}
-pending_photos: dict[str, PendingPhoto] = {}
-awaiting_state: dict[int, str] = {}  # user_id -> state tag
-
-# Transient scratch space for the multi-step "admin adds/renews a user" flows
-# (chosen duration, manually-typed name/username while we wait for more
-# messages). Keyed by the *admin's* user_id, not the target user's.
-admin_flow: dict[int, dict] = {}
-
-# (label, days) options offered when picking how long a user's access lasts.
-# days == 0 means "no expiry" (unlimited).
-DURATION_OPTIONS = [
-    ("۱ هفته", 7),
-    ("۳ ماهه", 90),
-    ("۶ ماهه", 180),
-    ("۱ ساله", 365),
-    ("نامحدود", 0),
-]
+# PendingFile, PendingPhoto, and every shared in-process dict
+# (pending_files, pending_photos, awaiting_state, admin_flow,
+# pending_passwords, job_folder_links) moved to models/ and state.py —
+# phase C of the module split (see CLAUDE.md's change log). Imported
+# above; every existing call site in this file keeps working unchanged
+# since these are the exact same dict objects, just defined elsewhere.
 
 # How often the background task checks for users whose access is about to
 # expire, and how far ahead it warns them.
 REMINDER_CHECK_INTERVAL_SECONDS = 6 * 3600   # every 6 hours
 REMINDER_THRESHOLD_SECONDS = 3 * 86400        # warn 3 days before expiry
 
-# job_id -> [(folder_name, message_id_in_destination_chat), ...], used to
-# build a linked Table Of Contents once an archive job finishes.
-job_folder_links: dict[str, list[tuple[str, int]]] = {}
-
 
 # ======================================================================
 # Keyboards
 # ======================================================================
-
-def quality_keyboard(pid: str) -> InlineKeyboardMarkup:
-    rows = [
-        [InlineKeyboardButton(text="144p", callback_data=f"q:{pid}:144"),
-         InlineKeyboardButton(text="240p", callback_data=f"q:{pid}:240")],
-        [InlineKeyboardButton(text="360p", callback_data=f"q:{pid}:360"),
-         InlineKeyboardButton(text="480p", callback_data=f"q:{pid}:480")],
-        [InlineKeyboardButton(text="720p", callback_data=f"q:{pid}:720")],
-        [InlineKeyboardButton(text="🎵 فقط صدا (mp3)", callback_data=f"q:{pid}:mp3"),
-         InlineKeyboardButton(text="🎧 صدا (m4a)", callback_data=f"q:{pid}:m4a")],
-        [InlineKeyboardButton(text="🎙 وویس", callback_data=f"q:{pid}:voice")],
-        [InlineKeyboardButton(text="🖼 فقط کولاژ تامبنیل (بدون تبدیل ویدیو)", callback_data=f"q:{pid}:thumbs")],
-    ]
-    return InlineKeyboardMarkup(inline_keyboard=rows)
-
-
-def options_keyboard(pid: str) -> InlineKeyboardMarkup:
-    pending = pending_files[pid]
-    o = pending.options
-    rows = []
-
-    is_video_output = pending.file_type == "VIDEO" and o.get("quality") not in ("mp3", "m4a", "voice", "thumbs")
-    is_thumbs_only = o.get("quality") == "thumbs"
-
-    if is_video_output:
-        rows.append([InlineKeyboardButton(
-            text=f"📦 آپلود به‌صورت: {'ویدیو' if o.get('upload_as') == 'video' else 'فایل'}",
-            callback_data=f"o:{pid}:upload_as",
-        )])
-        rows.append([InlineKeyboardButton(
-            text=f"💧 واترمارک: {'فعال' if o.get('watermark') else 'غیرفعال'}",
-            callback_data=f"o:{pid}:watermark",
-        )])
-        rows.append([InlineKeyboardButton(text="🖼 تغییر تامبنیل", callback_data=f"o:{pid}:thumb")])
-
-    if pending.file_type == "VIDEO" and not is_thumbs_only:
-        rows.append([InlineKeyboardButton(
-            text=f"🖼 همراه با کولاژ تامبنیل: {'بله ✅' if o.get('make_collage') else 'خیر'}",
-            callback_data=f"o:{pid}:make_collage",
-        )])
-
-    if is_thumbs_only or o.get("make_collage"):
-        count_label = o.get("thumb_count") or "خودکار"
-        columns_label = o.get("thumb_columns") or "خودکار"
-        rows.append([InlineKeyboardButton(
-            text=f"🔢 تعداد عکس‌ها: {count_label}",
-            callback_data=f"o:{pid}:thumb_count",
-        )])
-        rows.append([InlineKeyboardButton(
-            text=f"📐 تعداد ستون: {columns_label}",
-            callback_data=f"o:{pid}:thumb_columns",
-        )])
-
-    if pending.file_type == "AUDIO" or o.get("quality") in ("mp3", "m4a", "voice"):
-        rows.append([InlineKeyboardButton(text="🎵 عنوان و خواننده", callback_data=f"o:{pid}:title")])
-
-    if pending.file_type == "ARCHIVE":
-        if pending.is_multipart:
-            rows.append([InlineKeyboardButton(
-                text=f"📦 چندبخشی: {len(pending.part_message_ids)}/{pending.parts_total} بخش دریافت شد",
-                callback_data="nothing",
-            )])
-        else:
-            rows.append([InlineKeyboardButton(text="📦 آرشیو چندبخشی است", callback_data=f"o:{pid}:multipart")])
-
-        rows.append([InlineKeyboardButton(
-            text=f"🔑 رمز آرشیو: {'تنظیم شده ✅' if o.get('password') else 'اگر می‌دانید تنظیم کنید'}",
-            callback_data=f"o:{pid}:archive_password",
-        )])
-
-    rows.append([InlineKeyboardButton(text="✏️ تغییر نام فایل", callback_data=f"o:{pid}:name")])
-
-    rows.append([InlineKeyboardButton(
-        text=f"📤 مقصد: {o.get('target_label', 'خودم')}",
-        callback_data=f"o:{pid}:target",
-    )])
-
-    rows.append([
-        InlineKeyboardButton(text="✅ آپلود کن", callback_data=f"o:{pid}:go"),
-        InlineKeyboardButton(text="❌ لغو", callback_data=f"o:{pid}:cancel"),
-    ])
-
-    return InlineKeyboardMarkup(inline_keyboard=rows)
-
-
-def target_keyboard(pid: str) -> InlineKeyboardMarkup:
-    return InlineKeyboardMarkup(inline_keyboard=[
-        [InlineKeyboardButton(text="👤 خودم", callback_data=f"t:{pid}:me")],
-        [InlineKeyboardButton(text="➕ چت جدید", callback_data=f"t:{pid}:new")],
-    ])
-
-
-def settings_text_and_keyboard(user_id: int) -> dict:
-    s = settings_store.get(user_id)
-
-    text = (
-        "⚙️ تنظیمات پیش‌فرض شما:\n\n"
-        f"🎚 کیفیت پیش‌فرض ویدیو: {s['quality']}p\n"
-        f"💧 واترمارک: {'فعال' if s['watermark'] else 'غیرفعال'}\n"
-        f"📦 آپلود به‌صورت: {'ویدیو' if s['upload_as'] == 'video' else 'فایل'}\n"
-        f"📤 مقصد ارسال پیش‌فرض: {s['target_label']}\n"
-        f"🎤 خواننده پیش‌فرض: {s['artist'] or '—'}\n"
-        f"🖼 لوگوی واترمارک: {'تنظیم شده' if s['logo_path'] else 'پیش‌فرض سیستم'}\n"
-        f"📍 محل واترمارک: {POSITION_LABELS_FA.get(s['logo_position'], s['logo_position'])}\n"
-        f"📝 کپشن پیش‌فرض مدیاها: {s['media_caption'] or '— (بدون کپشن)'}\n"
-        f"🔤 ترتیب فایل‌های آرشیو: {'بر اساس تاریخ' if s['sort_mode'] == 'date' else 'بر اساس نام'} "
-        f"({'نزولی' if s['sort_order'] == 'desc' else 'صعودی'})\n"
-        f"🧹 متن حذفی از نام فایل‌ها: {s['exclude_text'] or '— (خالی)'}\n"
-    )
-
-    kb = InlineKeyboardMarkup(inline_keyboard=[
-        [InlineKeyboardButton(text="🎚 تغییر کیفیت پیش‌فرض", callback_data="s:quality")],
-        [InlineKeyboardButton(
-            text=f"💧 واترمارک: {'خاموش کن' if s['watermark'] else 'روشن کن'}",
-            callback_data="s:watermark",
-        )],
-        [InlineKeyboardButton(
-            text=f"📦 آپلود پیش‌فرض: {'فایل کن' if s['upload_as'] == 'video' else 'ویدیو کن'}",
-            callback_data="s:upload_as",
-        )],
-        [InlineKeyboardButton(text="📤 تغییر مقصد پیش‌فرض", callback_data="s:target")],
-        [InlineKeyboardButton(text="🎤 تغییر خواننده پیش‌فرض", callback_data="s:artist")],
-        [InlineKeyboardButton(text="🖼 تغییر لوگوی واترمارک", callback_data="s:logo")],
-        [InlineKeyboardButton(text="📍 تغییر محل واترمارک", callback_data="s:logopos")],
-        [InlineKeyboardButton(text="📝 تغییر کپشن پیش‌فرض", callback_data="s:caption")],
-        [InlineKeyboardButton(
-            text=f"🔤 ترتیب: {'تاریخ' if s['sort_mode'] == 'date' else 'نام'} کن",
-            callback_data="s:sortmode",
-        ),
-         InlineKeyboardButton(
-            text=f"↕️ جهت: {'نزولی' if s['sort_order'] == 'desc' else 'صعودی'} کن",
-            callback_data="s:sortorder",
-        )],
-        [InlineKeyboardButton(text="🧹 تغییر متن حذفی (Exclude)", callback_data="s:exclude")],
-    ])
-
-    return {"text": text, "reply_markup": kb}
+# (quality_keyboard, options_keyboard, target_keyboard moved to
+# keyboards/files.py; settings_text_and_keyboard moved to
+# keyboards/settings.py — phase B of the module split, see CLAUDE.md's
+# change log. Imported above.
 
 
 # ======================================================================
@@ -360,16 +179,10 @@ async def settings_command(message: Message):
     await message.answer(**settings_text_and_keyboard(message.from_user.id))
 
 
-@dp.message(Command("admin"), F.chat.type == "private")
-async def admin_command(message: Message):
-    if not is_admin(message.from_user.id):
-        await message.answer(not_authorized_text())
-        return
-
-    await message.answer(
-        "⚙️ پنل مدیریت کاربران:",
-        reply_markup=admin_panel_keyboard(),
-    )
+# /admin command moved to handlers/admin.py (registered on its Router,
+# included above via dp.include_router(admin_router)) — phase D, step 1
+# of the module split, see CLAUDE.md's change log. `admin_command` is
+# still imported into this namespace for backward compatibility.
 
 
 @dp.message(Command("cancel"), F.chat.type == "private")
@@ -394,306 +207,9 @@ async def cancel_command(message: Message):
 # ======================================================================
 # Admin panel callbacks
 # ======================================================================
-
-@dp.callback_query(F.data == "admin:add_user")
-async def admin_add_user(callback: CallbackQuery):
-    if not is_admin(callback.from_user.id):
-        await callback.answer("اجازه‌ی این کار را ندارید.", show_alert=True)
-        return
-
-    await callback.message.answer(
-        "مدت اعتبار دسترسی کاربر جدید را انتخاب کنید:",
-        reply_markup=duration_keyboard("add"),
-    )
-    await callback.answer()
-
-
-@dp.callback_query(F.data == "admin:renew_user")
-async def admin_renew_user(callback: CallbackQuery):
-    if not is_admin(callback.from_user.id):
-        await callback.answer("اجازه‌ی این کار را ندارید.", show_alert=True)
-        return
-
-    awaiting_state[callback.from_user.id] = "admin_renew_target"
-    await callback.message.answer(
-        "یک پیام از کاربر مورد نظر فوروارد کنید یا آیدی عددی‌اش را بفرستید "
-        "تا تاریخ انقضای او را تغییر دهید.\n"
-        "برای انصراف /cancel را بفرستید."
-    )
-    await callback.answer()
-
-
-@dp.callback_query(F.data == "admin:toggle_user")
-async def admin_toggle_user(callback: CallbackQuery):
-    if not is_admin(callback.from_user.id):
-        await callback.answer("اجازه‌ی این کار را ندارید.", show_alert=True)
-        return
-
-    awaiting_state[callback.from_user.id] = "admin_toggle_target"
-    await callback.message.answer(
-        "یک پیام از کاربر مورد نظر فوروارد کنید یا آیدی عددی‌اش را بفرستید "
-        "تا وضعیت فعال/غیرفعال او تغییر کند.\n"
-        "برای انصراف /cancel را بفرستید."
-    )
-    await callback.answer()
-
-
-@dp.callback_query(F.data == "admin:delete_user")
-async def admin_delete_user(callback: CallbackQuery):
-    if not is_admin(callback.from_user.id):
-        await callback.answer("اجازه‌ی این کار را ندارید.", show_alert=True)
-        return
-
-    awaiting_state[callback.from_user.id] = "admin_delete_target"
-    await callback.message.answer(
-        "یک پیام از کاربر مورد نظر فوروارد کنید یا آیدی عددی‌اش را بفرستید "
-        "تا رکوردش به‌طور کامل حذف شود.\n"
-        "⚠️ این کار غیرقابل بازگشت است (برخلاف غیرفعال‌سازی، چیزی برای بازگردانی باقی نمی‌ماند).\n"
-        "برای انصراف /cancel را بفرستید."
-    )
-    await callback.answer()
-
-
-@dp.callback_query(F.data.startswith("admin:toggle_confirm:"))
-async def admin_toggle_confirmed(callback: CallbackQuery):
-    if not is_admin(callback.from_user.id):
-        await callback.answer("اجازه‌ی این کار را ندارید.", show_alert=True)
-        return
-
-    _, _, target_id_str, new_active_str = callback.data.split(":")
-    target_id = int(target_id_str)
-    new_active = bool(int(new_active_str))
-
-    ok = await access_store.set_active(target_id, new_active)
-    if not ok:
-        await callback.message.answer("این کاربر دیگر در لیست کاربران مجاز نیست.")
-    else:
-        status_text = "فعال ✅" if new_active else "غیرفعال ⛔️"
-        await callback.message.answer(f"وضعیت کاربر {target_id} به «{status_text}» تغییر یافت.")
-    await callback.answer()
-
-
-@dp.callback_query(F.data == "admin:toggle_cancel")
-async def admin_toggle_cancelled(callback: CallbackQuery):
-    if not is_admin(callback.from_user.id):
-        await callback.answer("اجازه‌ی این کار را ندارید.", show_alert=True)
-        return
-    await callback.message.answer("لغو شد؛ وضعیت کاربر تغییری نکرد.")
-    await callback.answer()
-
-
-@dp.callback_query(F.data.startswith("admin:delete_confirm:"))
-async def admin_delete_confirmed(callback: CallbackQuery):
-    if not is_admin(callback.from_user.id):
-        await callback.answer("اجازه‌ی این کار را ندارید.", show_alert=True)
-        return
-
-    target_id = int(callback.data.split(":")[2])
-    display = _user_display(target_id, access_store.get(target_id))
-
-    removed = await access_store.remove(target_id)
-    if removed:
-        await callback.message.answer(f"🗑 رکورد کاربر {display} به‌طور کامل حذف شد.")
-    else:
-        await callback.message.answer("این کاربر دیگر در لیست کاربران مجاز نیست.")
-    await callback.answer()
-
-
-@dp.callback_query(F.data == "admin:delete_cancel")
-async def admin_delete_cancelled(callback: CallbackQuery):
-    if not is_admin(callback.from_user.id):
-        await callback.answer("اجازه‌ی این کار را ندارید.", show_alert=True)
-        return
-    await callback.message.answer("لغو شد؛ کاربر حذف نشد.")
-    await callback.answer()
-
-
-@dp.callback_query(F.data.startswith("admin:dur:"))
-async def admin_duration_selected(callback: CallbackQuery):
-    if not is_admin(callback.from_user.id):
-        await callback.answer("اجازه‌ی این کار را ندارید.", show_alert=True)
-        return
-
-    admin_id = callback.from_user.id
-    # "admin:dur:<purpose>:<days>" or "admin:dur:<purpose>:<days>:<target_id>"
-    parts = callback.data.split(":")
-    purpose = parts[2]
-    days = int(parts[3])
-
-    if purpose == "add":
-        admin_flow[admin_id] = {"days": days}
-        awaiting_state[admin_id] = "admin_add_user"
-        await callback.message.answer(
-            "یک پیام از کاربر مورد نظر برای من فوروارد کنید (فوروارد باید نویسنده را نشان بدهد)، "
-            "یا مستقیماً آیدی عددی کاربر را بفرستید.\n"
-            "برای انصراف /cancel را بفرستید."
-        )
-        await callback.answer()
-        return
-
-    if purpose == "renew":
-        target_id = int(parts[4])
-        expires_at = compute_expiry(days)
-        existed = await access_store.update_expiry(target_id, expires_at)
-        if not existed:
-            await callback.message.answer("این کاربر دیگر در لیست کاربران مجاز نیست.")
-        else:
-            await callback.message.answer(
-                f"✅ تاریخ انقضای کاربر {target_id} به‌روزرسانی شد.\n"
-                f"⏳ انقضا: {format_expiry(expires_at)}"
-            )
-        await callback.answer()
-        return
-
-
-@dp.callback_query(F.data == "admin:list_users")
-async def admin_list_users(callback: CallbackQuery):
-    if not is_admin(callback.from_user.id):
-        await callback.answer("اجازه‌ی این کار را ندارید.", show_alert=True)
-        return
-
-    users = access_store.list_all()
-
-    if not users:
-        await callback.message.answer("هنوز هیچ کاربری اضافه نشده است.")
-        await callback.answer()
-        return
-
-    lines = ["📋 کاربران مجاز:\n"]
-    rows = []
-    for uid, info in users.items():
-        label = info.get("label") or info.get("name") or info.get("username") or "—"
-        active = info.get("active", True)
-        status = "✅ فعال" if active and not access_store.is_expired(info) else (
-            "⛔️ منقضی" if active else "⛔️ غیرفعال"
-        )
-        expiry_text = format_expiry(info.get("expires_at"))
-        lines.append(f"• {uid} ({label}) — {status} — انقضا: {expiry_text}")
-
-        button_label = label if len(label) <= 24 else label[:23] + "…"
-        rows.append([InlineKeyboardButton(
-            text=f"⚙️ {button_label} ({uid})",
-            callback_data=f"admin:manage:{uid}",
-        )])
-
-    lines.append("\nبرای تمدید/غیرفعال‌سازی/حذف سریع، روی هرکدوم از دکمه‌های زیر بزنید:")
-
-    await callback.message.answer(
-        "\n".join(lines),
-        reply_markup=InlineKeyboardMarkup(inline_keyboard=rows),
-    )
-    await callback.answer()
-
-
-@dp.callback_query(F.data.startswith("admin:manage:"))
-async def admin_manage_user(callback: CallbackQuery):
-    if not is_admin(callback.from_user.id):
-        await callback.answer("اجازه‌ی این کار را ندارید.", show_alert=True)
-        return
-
-    target_id = int(callback.data.split(":")[2])
-    info = access_store.get(target_id)
-
-    if info is None:
-        await callback.message.answer("این کاربر دیگر در لیست کاربران مجاز نیست.")
-        await callback.answer()
-        return
-
-    display = _user_display(target_id, info)
-    status = "✅ فعال" if info["active"] and not access_store.is_expired(info) else (
-        "⛔️ منقضی" if info["active"] else "⛔️ غیرفعال"
-    )
-    expiry_text = format_expiry(info["expires_at"])
-    toggle_label = "🚫 غیرفعال کردن" if info["active"] else "✅ فعال کردن"
-
-    text = (
-        f"⚙️ مدیریت کاربر {display} ({target_id})\n"
-        f"وضعیت: {status}\n"
-        f"انقضا: {expiry_text}"
-    )
-    keyboard = InlineKeyboardMarkup(inline_keyboard=[
-        [InlineKeyboardButton(text="⏳ تمدید / تغییر انقضا", callback_data=f"admin:manage_renew:{target_id}")],
-        [InlineKeyboardButton(text=toggle_label, callback_data=f"admin:manage_toggle:{target_id}")],
-        [InlineKeyboardButton(text="🗑 حذف کامل", callback_data=f"admin:manage_delete:{target_id}")],
-        [InlineKeyboardButton(text="🔙 بازگشت به لیست", callback_data="admin:list_users")],
-    ])
-    await callback.message.answer(text, reply_markup=keyboard)
-    await callback.answer()
-
-
-@dp.callback_query(F.data.startswith("admin:manage_renew:"))
-async def admin_manage_renew(callback: CallbackQuery):
-    if not is_admin(callback.from_user.id):
-        await callback.answer("اجازه‌ی این کار را ندارید.", show_alert=True)
-        return
-
-    target_id = int(callback.data.split(":")[2])
-    if access_store.get(target_id) is None:
-        await callback.message.answer("این کاربر دیگر در لیست کاربران مجاز نیست.")
-        await callback.answer()
-        return
-
-    await callback.message.answer(
-        "مدت اعتبار جدید را انتخاب کنید:",
-        reply_markup=duration_keyboard("renew", target_id),
-    )
-    await callback.answer()
-
-
-@dp.callback_query(F.data.startswith("admin:manage_toggle:"))
-async def admin_manage_toggle(callback: CallbackQuery):
-    if not is_admin(callback.from_user.id):
-        await callback.answer("اجازه‌ی این کار را ندارید.", show_alert=True)
-        return
-
-    target_id = int(callback.data.split(":")[2])
-    existing = access_store.get(target_id)
-
-    if existing is None:
-        await callback.message.answer("این کاربر دیگر در لیست کاربران مجاز نیست.")
-        await callback.answer()
-        return
-
-    new_active = not existing.get("active", True)
-    display = _user_display(target_id, existing)
-    action_text = "غیرفعال" if not new_active else "فعال"
-
-    await callback.message.answer(
-        f"آیا مطمئنید می‌خواهید کاربر {display} را {action_text} کنید؟",
-        reply_markup=confirm_keyboard(
-            confirm_data=f"admin:toggle_confirm:{target_id}:{1 if new_active else 0}",
-            cancel_data="admin:toggle_cancel",
-        ),
-    )
-    await callback.answer()
-
-
-@dp.callback_query(F.data.startswith("admin:manage_delete:"))
-async def admin_manage_delete(callback: CallbackQuery):
-    if not is_admin(callback.from_user.id):
-        await callback.answer("اجازه‌ی این کار را ندارید.", show_alert=True)
-        return
-
-    target_id = int(callback.data.split(":")[2])
-    existing = access_store.get(target_id)
-
-    if existing is None:
-        await callback.message.answer("این کاربر دیگر در لیست کاربران مجاز نیست.")
-        await callback.answer()
-        return
-
-    display = _user_display(target_id, existing)
-    await callback.message.answer(
-        f"⚠️ آیا مطمئنید می‌خواهید رکورد کاربر {display} به‌طور کامل حذف شود؟\n"
-        "این کار غیرقابل بازگشت است.",
-        reply_markup=confirm_keyboard(
-            confirm_data=f"admin:delete_confirm:{target_id}",
-            cancel_data="admin:delete_cancel",
-            confirm_label="🗑 بله، حذف کن",
-        ),
-    )
-    await callback.answer()
-
+# (moved to handlers/admin.py, registered on its Router — phase D, step 1
+# of the module split, see CLAUDE.md's change log. Every admin:*
+# callback is imported above for backward compatibility.)
 
 # ======================================================================
 # Global settings callbacks
@@ -857,7 +373,7 @@ async def quality_pick(callback: CallbackQuery):
 
     await callback.message.edit_text(
         "تنظیمات این فایل را بررسی و در صورت نیاز تغییر دهید:",
-        reply_markup=options_keyboard(pid),
+        reply_markup=options_keyboard(pid, pending_files),
     )
     await callback.answer()
 
@@ -873,19 +389,19 @@ async def options_action(callback: CallbackQuery):
 
     if action == "upload_as":
         pending.options["upload_as"] = "document" if pending.options.get("upload_as") == "video" else "video"
-        await callback.message.edit_reply_markup(reply_markup=options_keyboard(pid))
+        await callback.message.edit_reply_markup(reply_markup=options_keyboard(pid, pending_files))
         await callback.answer()
         return
 
     if action == "watermark":
         pending.options["watermark"] = not pending.options.get("watermark")
-        await callback.message.edit_reply_markup(reply_markup=options_keyboard(pid))
+        await callback.message.edit_reply_markup(reply_markup=options_keyboard(pid, pending_files))
         await callback.answer()
         return
 
     if action == "make_collage":
         pending.options["make_collage"] = not pending.options.get("make_collage")
-        await callback.message.edit_reply_markup(reply_markup=options_keyboard(pid))
+        await callback.message.edit_reply_markup(reply_markup=options_keyboard(pid, pending_files))
         await callback.answer()
         return
 
@@ -982,7 +498,7 @@ async def target_pick(callback: CallbackQuery):
         pending.options["target_label"] = "خودم"
         await callback.message.edit_text(
             "تنظیمات این فایل را بررسی و در صورت نیاز تغییر دهید:",
-            reply_markup=options_keyboard(pid),
+            reply_markup=options_keyboard(pid, pending_files),
         )
         await callback.answer()
         return
@@ -1038,15 +554,8 @@ async def finalize_job(callback: CallbackQuery, pending: PendingFile, pid: str):
 # ======================================================================
 # Plain photo -> watermark flow
 # ======================================================================
-
-def photo_confirm_keyboard(pid: str) -> InlineKeyboardMarkup:
-    return InlineKeyboardMarkup(inline_keyboard=[
-        [InlineKeyboardButton(text="💧 روی این عکس واترمارک بزن", callback_data=f"pw:{pid}:apply")],
-        [InlineKeyboardButton(text="🖼 تغییر لوگوی واترمارک", callback_data=f"pw:{pid}:changelogo")],
-        [InlineKeyboardButton(text="📍 تغییر محل واترمارک", callback_data=f"pw:{pid}:changepos")],
-        [InlineKeyboardButton(text="❌ نه، کاری نکن", callback_data=f"pw:{pid}:cancel")],
-    ])
-
+# (photo_confirm_keyboard moved to keyboards/photo.py — phase B of the
+# module split, see CLAUDE.md's change log. Imported above.
 
 async def handle_incoming_photo(message: Message):
 
@@ -1202,205 +711,12 @@ async def handle_awaited_input(message: Message, state: str) -> bool:
 
     user_id = message.from_user.id
 
-    if state == "admin_add_user":
-
-        if not is_admin(user_id):
-            awaiting_state.pop(user_id, None)
-            admin_flow.pop(user_id, None)
-            return False
-
-        target_id, name, username = _extract_target_from_message(message)
-
-        if target_id is None:
-            await message.answer(
-                "نتونستم کاربر را شناسایی کنم. یک پیام از او فوروارد کنید "
-                "(با نمایش نویسنده) یا آیدی عددی‌اش را بفرستید."
-            )
-            return True
-
-        flow = admin_flow.setdefault(user_id, {})
-        days = flow.get("days", 0)
-
-        if name or username:
-            # Real forward — Telegram already gave us name/username, no need
-            # to ask the admin to type them in by hand.
-            expires_at = compute_expiry(days)
-            await access_store.add(
-                target_id,
-                label=(name or username),
-                name=name,
-                username=username,
-                added_by=user_id,
-                expires_at=expires_at,
-            )
-            await pending_user_store.remove(target_id)
-            awaiting_state.pop(user_id, None)
-            admin_flow.pop(user_id, None)
-            await message.answer(
-                f"✅ کاربر {name or username or target_id} به لیست مجاز اضافه شد.\n"
-                f"⏳ انقضا: {format_expiry(expires_at)}"
-            )
-            return True
-
-        # Manually-typed numeric id — Telegram gave us nothing about this
-        # user, so let the admin attach a name/username by hand (either can
-        # be left blank).
-        flow["target_id"] = target_id
-        awaiting_state[user_id] = "admin_add_name"
-        await message.answer(
-            "نام کاربر را وارد کنید (اختیاری؛ برای رد شدن «-» بفرستید):"
-        )
-        return True
-
-    if state == "admin_add_name":
-
-        if not is_admin(user_id):
-            awaiting_state.pop(user_id, None)
-            admin_flow.pop(user_id, None)
-            return False
-
-        if not message.text:
-            await message.answer("لطفاً نام را به‌صورت متن بفرستید، یا «-» برای رد شدن.")
-            return True
-
-        text = message.text.strip()
-        admin_flow.setdefault(user_id, {})["name"] = "" if text in ("-", "خالی") else text
-        awaiting_state[user_id] = "admin_add_username"
-        await message.answer(
-            "یوزرنیم کاربر را وارد کنید (اختیاری؛ برای رد شدن «-» بفرستید):"
-        )
-        return True
-
-    if state == "admin_add_username":
-
-        if not is_admin(user_id):
-            awaiting_state.pop(user_id, None)
-            admin_flow.pop(user_id, None)
-            return False
-
-        if not message.text:
-            await message.answer("لطفاً یوزرنیم را به‌صورت متن بفرستید، یا «-» برای رد شدن.")
-            return True
-
-        text = message.text.strip()
-        username = "" if text in ("-", "خالی") else text.lstrip("@")
-
-        flow = admin_flow.pop(user_id, {})
-        target_id = flow.get("target_id")
-        name = flow.get("name", "")
-        days = flow.get("days", 0)
-        expires_at = compute_expiry(days)
-
-        await access_store.add(
-            target_id,
-            label=(name or username or str(target_id)),
-            name=name,
-            username=username,
-            added_by=user_id,
-            expires_at=expires_at,
-        )
-        await pending_user_store.remove(target_id)
-        awaiting_state.pop(user_id, None)
-        await message.answer(
-            f"✅ کاربر {name or username or target_id} به لیست مجاز اضافه شد.\n"
-            f"⏳ انقضا: {format_expiry(expires_at)}"
-        )
-        return True
-
-    if state == "admin_renew_target":
-
-        if not is_admin(user_id):
-            awaiting_state.pop(user_id, None)
-            return False
-
-        target_id, _, _ = _extract_target_from_message(message)
-
-        if target_id is None:
-            await message.answer(
-                "نتونستم کاربر را شناسایی کنم. یک پیام از او فوروارد کنید "
-                "یا آیدی عددی‌اش را بفرستید."
-            )
-            return True
-
-        if access_store.get(target_id) is None:
-            awaiting_state.pop(user_id, None)
-            await message.answer("این کاربر در لیست کاربران مجاز نیست.")
-            return True
-
-        awaiting_state.pop(user_id, None)
-        await message.answer(
-            "مدت اعتبار جدید را انتخاب کنید:",
-            reply_markup=duration_keyboard("renew", target_id),
-        )
-        return True
-
-    if state == "admin_toggle_target":
-
-        if not is_admin(user_id):
-            awaiting_state.pop(user_id, None)
-            return False
-
-        target_id, _, _ = _extract_target_from_message(message)
-
-        if target_id is None:
-            await message.answer(
-                "نتونستم کاربر را شناسایی کنم. یک پیام از او فوروارد کنید "
-                "یا آیدی عددی‌اش را بفرستید."
-            )
-            return True
-
-        existing = access_store.get(target_id)
-        if existing is None:
-            awaiting_state.pop(user_id, None)
-            await message.answer("این کاربر در لیست کاربران مجاز نیست.")
-            return True
-
-        awaiting_state.pop(user_id, None)
-        new_active = not existing.get("active", True)
-        display = _user_display(target_id, existing)
-        action_text = "غیرفعال" if not new_active else "فعال"
-        await message.answer(
-            f"آیا مطمئنید می‌خواهید کاربر {display} را {action_text} کنید؟",
-            reply_markup=confirm_keyboard(
-                confirm_data=f"admin:toggle_confirm:{target_id}:{1 if new_active else 0}",
-                cancel_data="admin:toggle_cancel",
-            ),
-        )
-        return True
-
-    if state == "admin_delete_target":
-
-        if not is_admin(user_id):
-            awaiting_state.pop(user_id, None)
-            return False
-
-        target_id, _, _ = _extract_target_from_message(message)
-
-        if target_id is None:
-            await message.answer(
-                "نتونستم کاربر را شناسایی کنم. یک پیام از او فوروارد کنید "
-                "یا آیدی عددی‌اش را بفرستید."
-            )
-            return True
-
-        existing = access_store.get(target_id)
-        if existing is None:
-            awaiting_state.pop(user_id, None)
-            await message.answer("این کاربر در لیست کاربران مجاز نیست.")
-            return True
-
-        awaiting_state.pop(user_id, None)
-        display = _user_display(target_id, existing)
-        await message.answer(
-            f"⚠️ آیا مطمئنید می‌خواهید رکورد کاربر {display} به‌طور کامل حذف شود؟\n"
-            "این کار غیرقابل بازگشت است.",
-            reply_markup=confirm_keyboard(
-                confirm_data=f"admin:delete_confirm:{target_id}",
-                cancel_data="admin:delete_cancel",
-                confirm_label="🗑 بله، حذف کن",
-            ),
-        )
-        return True
+    # admin_* states are handled entirely by handlers/admin.py — phase D,
+    # step 1 of the module split (see CLAUDE.md's change log). This is the
+    # dispatch point the other domains (settings/file/photo) will move
+    # behind too, once they're split out in later steps.
+    if state.startswith("admin_"):
+        return await handle_admin_awaited_input(message, state)
 
     if state == "settings_artist":
         if not message.text:
@@ -1479,7 +795,7 @@ async def handle_awaited_input(message: Message, state: str) -> bool:
             await bot.download(message.photo[-1], destination=path)
             pending.options["custom_thumbnail"] = str(path)
             awaiting_state.pop(user_id, None)
-            await message.answer("✅ تامبنیل ذخیره شد.", reply_markup=options_keyboard(pid))
+            await message.answer("✅ تامبنیل ذخیره شد.", reply_markup=options_keyboard(pid, pending_files))
             return True
 
         if field_name == "name":
@@ -1487,7 +803,7 @@ async def handle_awaited_input(message: Message, state: str) -> bool:
                 return False
             pending.options["rename_to"] = message.text.strip()
             awaiting_state.pop(user_id, None)
-            await message.answer("✅ نام فایل بروزرسانی شد.", reply_markup=options_keyboard(pid))
+            await message.answer("✅ نام فایل بروزرسانی شد.", reply_markup=options_keyboard(pid, pending_files))
             return True
 
         if field_name == "thumb_count":
@@ -1502,7 +818,7 @@ async def handle_awaited_input(message: Message, state: str) -> bool:
                 await message.answer("لطفاً یک عدد بین 1 تا 60 بفرستید، یا «خودکار».")
                 return True
             awaiting_state.pop(user_id, None)
-            await message.answer("✅ تعداد عکس‌ها بروزرسانی شد.", reply_markup=options_keyboard(pid))
+            await message.answer("✅ تعداد عکس‌ها بروزرسانی شد.", reply_markup=options_keyboard(pid, pending_files))
             return True
 
         if field_name == "thumb_columns":
@@ -1517,7 +833,7 @@ async def handle_awaited_input(message: Message, state: str) -> bool:
                 await message.answer("لطفاً یک عدد بین 1 تا 20 بفرستید، یا «خودکار».")
                 return True
             awaiting_state.pop(user_id, None)
-            await message.answer("✅ تعداد ستون بروزرسانی شد.", reply_markup=options_keyboard(pid))
+            await message.answer("✅ تعداد ستون بروزرسانی شد.", reply_markup=options_keyboard(pid, pending_files))
             return True
 
         if field_name == "title":
@@ -1528,7 +844,7 @@ async def handle_awaited_input(message: Message, state: str) -> bool:
             if len(parts) > 1:
                 pending.options["artist"] = parts[1].strip()
             awaiting_state.pop(user_id, None)
-            await message.answer("✅ عنوان/خواننده بروزرسانی شد.", reply_markup=options_keyboard(pid))
+            await message.answer("✅ عنوان/خواننده بروزرسانی شد.", reply_markup=options_keyboard(pid, pending_files))
             return True
 
         if field_name == "target":
@@ -1546,7 +862,7 @@ async def handle_awaited_input(message: Message, state: str) -> bool:
             pending.options["target_chat_id"] = chat_id
             pending.options["target_label"] = label
             awaiting_state.pop(user_id, None)
-            await message.answer("✅ مقصد بروزرسانی شد.", reply_markup=options_keyboard(pid))
+            await message.answer("✅ مقصد بروزرسانی شد.", reply_markup=options_keyboard(pid, pending_files))
             return True
 
         if field_name == "parts_count":
@@ -1592,7 +908,7 @@ async def handle_awaited_input(message: Message, state: str) -> bool:
 
             await message.answer(
                 "تنظیمات این فایل را بررسی و در صورت نیاز تغییر دهید:",
-                reply_markup=options_keyboard(pid),
+                reply_markup=options_keyboard(pid, pending_files),
             )
             return True
 
@@ -1630,7 +946,7 @@ async def handle_awaited_input(message: Message, state: str) -> bool:
             await message.answer(
                 f"✅ هر {pending.parts_total} بخش دریافت شد. "
                 "تنظیمات نهایی را بررسی و در صورت نیاز تغییر دهید:",
-                reply_markup=options_keyboard(pid),
+                reply_markup=options_keyboard(pid, pending_files),
             )
             return True
 
@@ -1640,12 +956,10 @@ async def handle_awaited_input(message: Message, state: str) -> bool:
 # ======================================================================
 # User side: new files + password replies + awaited input
 # ======================================================================
+# (pending_passwords moved to state.py — phase C of the module split, see
+# CLAUDE.md's change log. Imported above.)
 
-# chat_id (== user_id for private chats) -> job_id waiting for an archive password
-pending_passwords: dict[int, str] = {}
-
-
-@dp.message(F.chat.type == "private")
+@catchall_router.message(F.chat.type == "private")
 async def handle_private_message(message: Message):
 
     user_id = message.from_user.id
@@ -1746,7 +1060,7 @@ async def handle_private_message(message: Message):
     else:
         await message.answer(
             "تنظیمات این فایل را بررسی و در صورت نیاز تغییر دهید:",
-            reply_markup=options_keyboard(pid),
+            reply_markup=options_keyboard(pid, pending_files),
         )
 
 
