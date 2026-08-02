@@ -21,6 +21,7 @@ from aiogram.types import Message
 from config import Telegram
 from core.logger import get_logger
 from services.access_store import access_store
+from services.pending_user_store import pending_user_store
 from services.telegram import telegram_service
 
 logger = get_logger(__name__)
@@ -124,3 +125,34 @@ async def notify_admins_of_new_pending_user(tg_user):
             await bot.send_message(admin_id, text)
         except Exception:
             logger.warning("Could not notify admin %s about new pending user %s", admin_id, tg_user.id)
+
+
+async def track_pending_user_if_needed(message: Message) -> None:
+    """Call this from EVERY place that checks `is_authorized(...)` for an
+    incoming private message — not just `/start`. A user can just as
+    easily send a file directly as their first interaction (this is
+    exactly what happens when testing with qa-userbot, which sends files
+    straight away without ever sending `/start` first); if the admin
+    notification only lived inside the `/start` handler, that user would
+    silently go unnoticed. Safe to call unconditionally: it's a no-op for
+    admins and for anyone already in `access_store` (regardless of
+    active/expired status — once registered, always registered here),
+    and it only notifies the admin once per person no matter how many
+    times this gets called for them."""
+    user_id = message.from_user.id
+
+    if is_admin(user_id) or access_store.get(user_id) is not None:
+        return
+
+    tg_user = message.from_user
+    is_new_pending = await pending_user_store.record_start(
+        user_id,
+        first_name=tg_user.first_name or "",
+        last_name=tg_user.last_name or "",
+        username=tg_user.username or "",
+        language_code=tg_user.language_code or "",
+        is_bot=tg_user.is_bot or False,
+    )
+    if is_new_pending:
+        await notify_admins_of_new_pending_user(tg_user)
+        await pending_user_store.mark_notified(user_id)

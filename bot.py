@@ -32,6 +32,7 @@ from utils.access_control import (
     _extract_target_from_message,
     _user_display,
     notify_admins_of_new_pending_user,
+    track_pending_user_if_needed,
 )
 from keyboards.constants import (
     QUALITY_LABELS,
@@ -64,11 +65,50 @@ from handlers.admin import (
     handle_admin_awaited_input,
 )
 
+from handlers.settings import (
+    router as settings_router,
+    settings_command,
+    settings_quality,
+    settings_quality_pick,
+    settings_watermark,
+    settings_upload_as,
+    settings_sort_mode,
+    settings_sort_order,
+    settings_exclude,
+    settings_artist,
+    settings_logo,
+    settings_logo_position,
+    settings_logo_position_pick,
+    settings_target,
+    settings_target_pick,
+    settings_caption,
+    handle_settings_awaited_input,
+)
+from services.target_resolver import resolve_target as _resolve_target
+from handlers.files import (
+    router as files_router,
+    quality_pick,
+    options_action,
+    noop_callback,
+    target_pick,
+    finalize_job,
+    handle_file_awaited_input,
+)
+from handlers.photo import (
+    router as photo_router,
+    handle_incoming_photo,
+    photo_watermark_action,
+    apply_watermark_to_photo,
+)
+
 logger = get_logger(__name__)
 
 bot = telegram_service.bot
 dp = AiogramDispatcher()
 dp.include_router(admin_router)
+dp.include_router(settings_router)
+dp.include_router(files_router)
+dp.include_router(photo_router)
 
 # IMPORTANT: aiogram checks a router's OWN directly-decorated handlers
 # before descending into any included sub-router, REGARDLESS of when
@@ -144,22 +184,12 @@ REMINDER_THRESHOLD_SECONDS = 3 * 86400        # warn 3 days before expiry
 async def start(message: Message):
     user_id = message.from_user.id
 
-    # Track anyone who /start-s without being in access_store yet, so the
-    # admin can see who's shown interest (and can be told about it once,
-    # not on every repeat /start) — see CLAUDE.md's change log for why.
-    if not is_admin(user_id) and access_store.get(user_id) is None:
-        tg_user = message.from_user
-        is_new_pending = await pending_user_store.record_start(
-            user_id,
-            first_name=tg_user.first_name or "",
-            last_name=tg_user.last_name or "",
-            username=tg_user.username or "",
-            language_code=tg_user.language_code or "",
-            is_bot=tg_user.is_bot or False,
-        )
-        if is_new_pending:
-            await notify_admins_of_new_pending_user(tg_user)
-            await pending_user_store.mark_notified(user_id)
+    # Track anyone interacting with the bot without being in access_store
+    # yet, and notify the admin (once per person) — see
+    # track_pending_user_if_needed's docstring for why this same call also
+    # has to happen in handle_private_message and settings_command, not
+    # just here.
+    await track_pending_user_if_needed(message)
 
     if not is_authorized(user_id):
         await message.answer(not_authorized_text(user_id))
@@ -171,13 +201,9 @@ async def start(message: Message):
     )
 
 
-@dp.message(Command("settings"), F.chat.type == "private")
-async def settings_command(message: Message):
-    if not is_authorized(message.from_user.id):
-        await message.answer(not_authorized_text(message.from_user.id))
-        return
-    await message.answer(**settings_text_and_keyboard(message.from_user.id))
-
+# /settings command moved to handlers/settings.py (registered on its
+# Router, included above via dp.include_router(settings_router)) — phase
+# D, step 2 of the module split, see CLAUDE.md's change log.
 
 # /admin command moved to handlers/admin.py (registered on its Router,
 # included above via dp.include_router(admin_router)) — phase D, step 1
@@ -214,450 +240,26 @@ async def cancel_command(message: Message):
 # ======================================================================
 # Global settings callbacks
 # ======================================================================
-
-@dp.callback_query(F.data == "s:quality")
-async def settings_quality(callback: CallbackQuery):
-    kb = InlineKeyboardMarkup(inline_keyboard=[
-        [InlineKeyboardButton(text="144p", callback_data="sq:144"),
-         InlineKeyboardButton(text="240p", callback_data="sq:240")],
-        [InlineKeyboardButton(text="360p", callback_data="sq:360"),
-         InlineKeyboardButton(text="480p", callback_data="sq:480")],
-        [InlineKeyboardButton(text="720p", callback_data="sq:720")],
-    ])
-    await callback.message.edit_text("کیفیت پیش‌فرض جدید را انتخاب کنید:", reply_markup=kb)
-    await callback.answer()
-
-
-@dp.callback_query(F.data.startswith("sq:"))
-async def settings_quality_pick(callback: CallbackQuery):
-    value = callback.data.split(":", 1)[1]
-    await settings_store.update(callback.from_user.id, quality=value)
-    await callback.message.edit_text(**settings_text_and_keyboard(callback.from_user.id))
-    await callback.answer("بروزرسانی شد")
-
-
-@dp.callback_query(F.data == "s:watermark")
-async def settings_watermark(callback: CallbackQuery):
-    s = settings_store.get(callback.from_user.id)
-    await settings_store.update(callback.from_user.id, watermark=not s["watermark"])
-    await callback.message.edit_text(**settings_text_and_keyboard(callback.from_user.id))
-    await callback.answer("بروزرسانی شد")
-
-
-@dp.callback_query(F.data == "s:upload_as")
-async def settings_upload_as(callback: CallbackQuery):
-    s = settings_store.get(callback.from_user.id)
-    new_val = "video" if s["upload_as"] == "document" else "document"
-    await settings_store.update(callback.from_user.id, upload_as=new_val)
-    await callback.message.edit_text(**settings_text_and_keyboard(callback.from_user.id))
-    await callback.answer("بروزرسانی شد")
-
-
-@dp.callback_query(F.data == "s:sortmode")
-async def settings_sort_mode(callback: CallbackQuery):
-    s = settings_store.get(callback.from_user.id)
-    new_val = "date" if s["sort_mode"] == "name" else "name"
-    await settings_store.update(callback.from_user.id, sort_mode=new_val)
-    await callback.message.edit_text(**settings_text_and_keyboard(callback.from_user.id))
-    await callback.answer("بروزرسانی شد")
-
-
-@dp.callback_query(F.data == "s:sortorder")
-async def settings_sort_order(callback: CallbackQuery):
-    s = settings_store.get(callback.from_user.id)
-    new_val = "desc" if s["sort_order"] == "asc" else "asc"
-    await settings_store.update(callback.from_user.id, sort_order=new_val)
-    await callback.message.edit_text(**settings_text_and_keyboard(callback.from_user.id))
-    await callback.answer("بروزرسانی شد")
-
-
-@dp.callback_query(F.data == "s:exclude")
-async def settings_exclude(callback: CallbackQuery):
-    awaiting_state[callback.from_user.id] = "settings_exclude"
-    await callback.message.answer(
-        "متنی که می‌خواهید از نام همه‌ی فایل‌ها حذف شود را بفرستید "
-        "(مثلاً یک تبلیغ یا واترمارک متنی مثل «[www.site.com]»).\n"
-        "برای غیرفعال کردن این قابلیت، کلمه‌ی «حذف» را بفرستید."
-    )
-    await callback.answer()
-
-
-@dp.callback_query(F.data == "s:artist")
-async def settings_artist(callback: CallbackQuery):
-    awaiting_state[callback.from_user.id] = "settings_artist"
-    await callback.message.answer("نام خواننده/هنرمند پیش‌فرض را بفرستید:")
-    await callback.answer()
-
-
-@dp.callback_query(F.data == "s:logo")
-async def settings_logo(callback: CallbackQuery):
-    awaiting_state[callback.from_user.id] = "settings_logo"
-    await callback.message.answer("تصویر لوگو را به‌صورت عکس بفرستید:")
-    await callback.answer()
-
-
-@dp.callback_query(F.data == "s:logopos")
-async def settings_logo_position(callback: CallbackQuery):
-    current = settings_store.get(callback.from_user.id)["logo_position"]
-    await callback.message.edit_text(
-        "📍 محل قرارگیری واترمارک روی ویدیو را انتخاب کنید:",
-        reply_markup=logo_position_keyboard(current),
-    )
-    await callback.answer()
-
-
-@dp.callback_query(F.data.startswith("slogopos:"))
-async def settings_logo_position_pick(callback: CallbackQuery):
-    position = callback.data.split(":", 1)[1]
-    await settings_store.update(callback.from_user.id, logo_position=position)
-    await callback.message.edit_text(**settings_text_and_keyboard(callback.from_user.id))
-    await callback.answer(f"موقعیت: {POSITION_LABELS_FA.get(position, position)}")
-
-
-@dp.callback_query(F.data == "s:target")
-async def settings_target(callback: CallbackQuery):
-    kb = InlineKeyboardMarkup(inline_keyboard=[
-        [InlineKeyboardButton(text="👤 ارسال به خودم", callback_data="starget:me")],
-        [InlineKeyboardButton(text="➕ تنظیم کانال/گروه جدید", callback_data="starget:new")],
-    ])
-    await callback.message.edit_text(
-        "مقصد پیش‌فرض ارسال فایل‌ها را انتخاب کنید:",
-        reply_markup=kb,
-    )
-    await callback.answer()
-
-
-@dp.callback_query(F.data.startswith("starget:"))
-async def settings_target_pick(callback: CallbackQuery):
-    choice = callback.data.split(":", 1)[1]
-
-    if choice == "me":
-        await settings_store.update(callback.from_user.id, target_chat_id=0, target_label="خودم")
-        await callback.message.edit_text(**settings_text_and_keyboard(callback.from_user.id))
-        await callback.answer("بروزرسانی شد")
-        return
-
-    awaiting_state[callback.from_user.id] = "settings_target"
-    await callback.message.answer(
-        "یک پیام از چت مقصد برای من فوروارد کنید، @username یا آیدی عددی آن را بفرستید.\n"
-        "⚠️ ربات باید عضو آن گروه/کانال باشد.\n"
-        "برای انصراف /cancel را بفرستید."
-    )
-    await callback.answer()
-
-
-@dp.callback_query(F.data == "s:caption")
-async def settings_caption(callback: CallbackQuery):
-    awaiting_state[callback.from_user.id] = "settings_caption"
-    await callback.message.answer(
-        "متن کپشن پیش‌فرض برای مدیاهای تحویلی را بفرستید.\n"
-        "برای حذف کپشن (بدون کپشن)، کلمه‌ی «حذف» را بفرستید."
-    )
-    await callback.answer()
-
+# (moved to handlers/settings.py, registered on its Router — phase D,
+# step 2 of the module split, see CLAUDE.md's change log. Every s:*/
+# sq:*/slogopos:*/starget:* callback is imported above for backward
+# compatibility.)
 
 # ======================================================================
 # Per-file quality / options callbacks
 # ======================================================================
-
-@dp.callback_query(F.data.startswith("q:"))
-async def quality_pick(callback: CallbackQuery):
-    _, pid, value = callback.data.split(":")
-    pending = pending_files.get(pid)
-
-    if not pending:
-        await callback.answer("این درخواست منقضی شده است.", show_alert=True)
-        return
-
-    pending.options["quality"] = value
-
-    await callback.message.edit_text(
-        "تنظیمات این فایل را بررسی و در صورت نیاز تغییر دهید:",
-        reply_markup=options_keyboard(pid, pending_files),
-    )
-    await callback.answer()
-
-
-@dp.callback_query(F.data.startswith("o:"))
-async def options_action(callback: CallbackQuery):
-    _, pid, action = callback.data.split(":", 2)
-    pending = pending_files.get(pid)
-
-    if not pending:
-        await callback.answer("این درخواست منقضی شده است.", show_alert=True)
-        return
-
-    if action == "upload_as":
-        pending.options["upload_as"] = "document" if pending.options.get("upload_as") == "video" else "video"
-        await callback.message.edit_reply_markup(reply_markup=options_keyboard(pid, pending_files))
-        await callback.answer()
-        return
-
-    if action == "watermark":
-        pending.options["watermark"] = not pending.options.get("watermark")
-        await callback.message.edit_reply_markup(reply_markup=options_keyboard(pid, pending_files))
-        await callback.answer()
-        return
-
-    if action == "make_collage":
-        pending.options["make_collage"] = not pending.options.get("make_collage")
-        await callback.message.edit_reply_markup(reply_markup=options_keyboard(pid, pending_files))
-        await callback.answer()
-        return
-
-    if action == "thumb":
-        awaiting_state[pending.user_id] = f"file:{pid}:thumb"
-        await callback.message.answer("تصویر تامبنیل جدید را بفرستید:")
-        await callback.answer()
-        return
-
-    if action == "name":
-        awaiting_state[pending.user_id] = f"file:{pid}:name"
-        await callback.message.answer("نام جدید فایل را بفرستید (بدون پسوند):")
-        await callback.answer()
-        return
-
-    if action == "thumb_count":
-        awaiting_state[pending.user_id] = f"file:{pid}:thumb_count"
-        await callback.message.answer(
-            "چند تا عکس می‌خواهید؟ یک عدد بفرستید (مثلاً 6)، یا «خودکار» برای انتخاب خودکار بر اساس طول ویدیو."
-        )
-        await callback.answer()
-        return
-
-    if action == "thumb_columns":
-        awaiting_state[pending.user_id] = f"file:{pid}:thumb_columns"
-        await callback.message.answer(
-            "عکس‌ها در چند ستون چیده شوند؟ یک عدد بفرستید (مثلاً 3)، یا «خودکار» برای چیدمان نزدیک به مربع."
-        )
-        await callback.answer()
-        return
-
-    if action == "title":
-        awaiting_state[pending.user_id] = f"file:{pid}:title"
-        await callback.message.answer("عنوان و خواننده را به‌صورت «عنوان | خواننده» بفرستید:")
-        await callback.answer()
-        return
-
-    if action == "multipart":
-        awaiting_state[pending.user_id] = f"file:{pid}:parts_count"
-        await callback.message.answer(
-            "این آرشیو چند بخش/تکه است؟ یک عدد بفرستید (مثلاً 5).\n"
-            "بعد از اعلام تعداد، بخش‌هایی که همین الان فرستادید به‌عنوان بخش ۱ ثبت می‌شود "
-            "و باید بقیه‌ی بخش‌ها را یکی‌یکی، به‌همین ترتیب که خودتان مرتب کرده‌اید، بفرستید."
-        )
-        await callback.answer()
-        return
-
-    if action == "archive_password":
-        awaiting_state[pending.user_id] = f"file:{pid}:archive_password"
-        await callback.message.answer(
-            "رمز این آرشیو را بفرستید.\n"
-            "اگر رمز را نمی‌دانید یا فراموش کردید، همین‌جا رد شوید — اگر لازم باشد، ربات خودش موقع پردازش رمز را از شما می‌خواهد."
-        )
-        await callback.answer()
-        return
-
-    if action == "target":
-        await callback.message.edit_text(
-            "مقصد ارسال فایل نهایی را انتخاب کنید:",
-            reply_markup=target_keyboard(pid),
-        )
-        await callback.answer()
-        return
-
-    if action == "go":
-        await finalize_job(callback, pending, pid)
-        return
-
-    if action == "cancel":
-        pending_files.pop(pid, None)
-        if awaiting_state.get(pending.user_id, "").startswith(f"file:{pid}:"):
-            awaiting_state.pop(pending.user_id, None)
-        await callback.message.edit_text("❌ لغو شد.")
-        await callback.answer()
-        return
-
-
-@dp.callback_query(F.data == "nothing")
-async def noop_callback(callback: CallbackQuery):
-    await callback.answer()
-
-
-@dp.callback_query(F.data.startswith("t:"))
-async def target_pick(callback: CallbackQuery):
-    _, pid, choice = callback.data.split(":")
-    pending = pending_files.get(pid)
-
-    if not pending:
-        await callback.answer("این درخواست منقضی شده است.", show_alert=True)
-        return
-
-    if choice == "me":
-        pending.options["target_chat_id"] = 0
-        pending.options["target_label"] = "خودم"
-        await callback.message.edit_text(
-            "تنظیمات این فایل را بررسی و در صورت نیاز تغییر دهید:",
-            reply_markup=options_keyboard(pid, pending_files),
-        )
-        await callback.answer()
-        return
-
-    if choice == "new":
-        awaiting_state[pending.user_id] = f"file:{pid}:target"
-        await callback.message.answer(
-            "یک پیام از گروه/کانال مقصد برای من فوروارد کنید، @username یا آیدی عددی آن را بفرستید.\n"
-            "⚠️ ربات باید عضو آن گروه/کانال (و دسترسی ارسال) داشته باشد.\n"
-            "برای انصراف /cancel را بفرستید."
-        )
-        await callback.answer()
-        return
-
-
-async def finalize_job(callback: CallbackQuery, pending: PendingFile, pid: str):
-
-    if pending.is_multipart:
-
-        job_data = {
-            "type": MessageType.JOB.value,
-            "user_id": pending.user_id,
-            "message_id": pending.part_message_ids[0],
-            "part_message_ids": pending.part_message_ids,
-            "file_type": pending.file_type,
-            "file_name": pending.file_name,
-            "original_chat_id": pending.chat_id,
-            "options": pending.options,
-        }
-
-    else:
-
-        forwarded = await pending.source_message.forward(Telegram.GROUP_ID)
-
-        job_data = {
-            "type": MessageType.JOB.value,
-            "user_id": pending.user_id,
-            "message_id": forwarded.message_id,
-            "file_type": pending.file_type,
-            "file_name": pending.file_name,
-            "original_chat_id": pending.chat_id,
-            "options": pending.options,
-        }
-
-    await telegram_service.send_job(job_data)
-
-    pending_files.pop(pid, None)
-
-    await callback.message.edit_text("✅ فایل برای پردازش ارسال شد. به‌زودی نتیجه برات میاد.")
-    await callback.answer()
-
+# (moved to handlers/files.py, registered on its Router — phase D, step 3
+# of the module split, see CLAUDE.md's change log. quality_pick,
+# options_action, noop_callback, target_pick, finalize_job, and
+# handle_file_awaited_input are imported above for backward compatibility.)
 
 # ======================================================================
 # Plain photo -> watermark flow
 # ======================================================================
-# (photo_confirm_keyboard moved to keyboards/photo.py — phase B of the
-# module split, see CLAUDE.md's change log. Imported above.
-
-async def handle_incoming_photo(message: Message):
-
-    pid = uuid4().hex[:10]
-
-    pending_photos[pid] = PendingPhoto(
-        user_id=message.from_user.id,
-        chat_id=message.chat.id,
-        source_message=message,
-    )
-
-    await message.answer(
-        "این یک عکسه، نه ویدیو/فایل صوتی/آرشیو. اگر می‌خواهید لوگوی واترمارک را روی همین عکس بزنم، تأیید کنید:",
-        reply_markup=photo_confirm_keyboard(pid),
-    )
-
-
-@dp.callback_query(F.data.startswith("pw:"))
-async def photo_watermark_action(callback: CallbackQuery):
-
-    _, pid, action = callback.data.split(":", 2)
-    pending = pending_photos.get(pid)
-
-    if not pending:
-        await callback.answer("این درخواست منقضی شده است.", show_alert=True)
-        return
-
-    if action == "apply":
-        await callback.message.edit_text("⏳ در حال اعمال واترمارک...")
-        await apply_watermark_to_photo(pid)
-        await callback.answer()
-        return
-
-    if action == "changelogo":
-        awaiting_state[pending.user_id] = "settings_logo"
-        await callback.message.answer(
-            "تصویر لوگوی جدید را به‌صورت عکس بفرستید. بعد از ذخیره، دوباره روی «💧 روی این عکس واترمارک بزن» بزنید."
-        )
-        await callback.answer()
-        return
-
-    if action == "changepos":
-        current = settings_store.get(pending.user_id)["logo_position"]
-        await callback.message.answer(
-            "📍 محل جدید واترمارک را انتخاب کنید. بعد از انتخاب، دوباره روی «💧 روی این عکس واترمارک بزن» بزنید.",
-            reply_markup=logo_position_keyboard(current),
-        )
-        await callback.answer()
-        return
-
-    if action == "cancel":
-        pending_photos.pop(pid, None)
-        await callback.message.edit_text("❌ باشه، کاری روی این عکس انجام نشد.")
-        await callback.answer()
-        return
-
-
-async def apply_watermark_to_photo(pid: str):
-
-    pending = pending_photos.pop(pid, None)
-
-    if not pending:
-        return
-
-    settings = settings_store.get(pending.user_id)
-    logo_path = Path(settings["logo_path"]) if settings.get("logo_path") else Paths.LOGO_FILE
-    position = settings.get("logo_position", "bottom_right")
-
-    if not logo_path.exists():
-        await telegram_service.send_text(
-            pending.user_id,
-            "هنوز هیچ لوگویی برای واترمارک تنظیم نکرده‌اید. اول از /settings یک لوگو تنظیم کنید.",
-        )
-        return
-
-    photo = pending.source_message.photo[-1]
-
-    input_path = Paths.TEMP / f"{pid}_input.jpg"
-    output_path = Paths.TEMP / f"{pid}_watermarked.jpg"
-    input_path.parent.mkdir(parents=True, exist_ok=True)
-
-    try:
-        await bot.download(photo, destination=input_path)
-
-        ok = await media_service.watermark_image(input_path, output_path, logo_path, position)
-
-        if not ok:
-            await telegram_service.send_text(
-                pending.user_id,
-                "متأسفانه اعمال واترمارک روی این عکس با خطا مواجه شد.",
-            )
-            return
-
-        await bot.send_photo(pending.user_id, FSInputFile(output_path))
-
-    finally:
-        for path in (input_path, output_path):
-            if path.exists():
-                try:
-                    path.unlink()
-                except OSError:
-                    pass
+# (moved to handlers/photo.py, registered on its Router — phase D, step 3
+# of the module split, see CLAUDE.md's change log. handle_incoming_photo,
+# photo_watermark_action, apply_watermark_to_photo are imported above for
+# backward compatibility.)
 
 
 # ======================================================================
@@ -679,32 +281,9 @@ async def _resolve_message_link(chat_id: int, message_id: int) -> str:
     return f"https://t.me/c/{internal}/{message_id}"
 
 
-async def _resolve_target(message: Message):
-    if message.forward_from_chat:
-        chat = message.forward_from_chat
-        return chat.id, (chat.title or chat.username or str(chat.id))
-
-    if message.text:
-        text = message.text.strip()
-
-        try:
-            chat = await bot.get_chat(text)
-            return chat.id, (chat.title or chat.username or str(chat.id))
-        except Exception:
-            pass
-
-        # Fallback: a raw numeric chat id. Useful for private
-        # channels/groups with no public @username — especially ones with
-        # "protect content" enabled, where forwarding a message doesn't
-        # reveal its source chat at all.
-        try:
-            chat_id = int(text)
-            chat = await bot.get_chat(chat_id)
-            return chat.id, (chat.title or chat.username or str(chat.id))
-        except Exception:
-            pass
-
-    return None, None
+# _resolve_target moved to services/target_resolver.py (phase D, step 2
+# of the module split, see CLAUDE.md's change log) — imported above as
+# _resolve_target for backward compatibility.
 
 
 async def handle_awaited_input(message: Message, state: str) -> bool:
@@ -712,243 +291,19 @@ async def handle_awaited_input(message: Message, state: str) -> bool:
     user_id = message.from_user.id
 
     # admin_* states are handled entirely by handlers/admin.py — phase D,
-    # step 1 of the module split (see CLAUDE.md's change log). This is the
-    # dispatch point the other domains (settings/file/photo) will move
-    # behind too, once they're split out in later steps.
+    # step 1 of the module split (see CLAUDE.md's change log).
     if state.startswith("admin_"):
         return await handle_admin_awaited_input(message, state)
 
-    if state == "settings_artist":
-        if not message.text:
-            return False
-        await settings_store.update(user_id, artist=message.text.strip())
-        awaiting_state.pop(user_id, None)
-        await message.answer(**settings_text_and_keyboard(user_id))
-        return True
+    # settings_* states are handled entirely by handlers/settings.py —
+    # phase D, step 2 of the module split.
+    if state.startswith("settings_"):
+        return await handle_settings_awaited_input(message, state)
 
-    if state == "settings_logo":
-        if not message.photo:
-            return False
-        path = Paths.CONFIG / "logos" / f"{user_id}.jpg"
-        path.parent.mkdir(parents=True, exist_ok=True)
-        await bot.download(message.photo[-1], destination=path)
-        await settings_store.update(user_id, logo_path=str(path))
-        awaiting_state.pop(user_id, None)
-        current = settings_store.get(user_id)["logo_position"]
-        await message.answer(
-            "✅ لوگو ذخیره شد.\n"
-            "حالا محل قرارگیری واترمارک روی ویدیو را انتخاب کنید:",
-            reply_markup=logo_position_keyboard(current),
-        )
-        return True
-
-    if state == "settings_target":
-        chat_id, label = await _resolve_target(message)
-        if chat_id is None:
-            if message.document or message.video or message.audio:
-                # They clearly want to work on a new file now, not finish
-                # setting a target — don't leave them stuck waiting.
-                awaiting_state.pop(user_id, None)
-                await message.answer("⏹ تنظیم مقصد لغو شد؛ این فایل را به‌عنوان کار جدید در نظر می‌گیرم.")
-                return False
-            await message.answer(
-                "چت را نشناختم. یک پیام از آن فوروارد کنید، @username یا آیدی عددی چت را بفرستید.\n"
-                "برای انصراف /cancel را بفرستید."
-            )
-            return True
-        await settings_store.update(user_id, target_chat_id=chat_id, target_label=label)
-        awaiting_state.pop(user_id, None)
-        await message.answer(**settings_text_and_keyboard(user_id))
-        return True
-
-    if state == "settings_caption":
-        if not message.text:
-            return False
-        new_caption = "" if message.text.strip() in ("حذف", "-", "none", "None") else message.text
-        await settings_store.update(user_id, media_caption=new_caption)
-        awaiting_state.pop(user_id, None)
-        await message.answer(**settings_text_and_keyboard(user_id))
-        return True
-
-    if state == "settings_exclude":
-        if not message.text:
-            return False
-        new_value = "" if message.text.strip() in ("حذف", "-", "none", "None") else message.text.strip()
-        await settings_store.update(user_id, exclude_text=new_value)
-        awaiting_state.pop(user_id, None)
-        await message.answer(**settings_text_and_keyboard(user_id))
-        return True
-
+    # file:* states are handled entirely by handlers/files.py — phase D,
+    # step 3 of the module split.
     if state.startswith("file:"):
-        _, pid, field_name = state.split(":")
-        pending = pending_files.get(pid)
-
-        if not pending:
-            awaiting_state.pop(user_id, None)
-            return False
-
-        if field_name == "thumb":
-            if not message.photo:
-                return False
-            path = Paths.TEMP / f"{pid}_thumb.jpg"
-            path.parent.mkdir(parents=True, exist_ok=True)
-            await bot.download(message.photo[-1], destination=path)
-            pending.options["custom_thumbnail"] = str(path)
-            awaiting_state.pop(user_id, None)
-            await message.answer("✅ تامبنیل ذخیره شد.", reply_markup=options_keyboard(pid, pending_files))
-            return True
-
-        if field_name == "name":
-            if not message.text:
-                return False
-            pending.options["rename_to"] = message.text.strip()
-            awaiting_state.pop(user_id, None)
-            await message.answer("✅ نام فایل بروزرسانی شد.", reply_markup=options_keyboard(pid, pending_files))
-            return True
-
-        if field_name == "thumb_count":
-            if not message.text:
-                return False
-            text = message.text.strip()
-            if text in ("خودکار", "auto", "0", "-"):
-                pending.options["thumb_count"] = 0
-            elif text.isdigit() and 1 <= int(text) <= 60:
-                pending.options["thumb_count"] = int(text)
-            else:
-                await message.answer("لطفاً یک عدد بین 1 تا 60 بفرستید، یا «خودکار».")
-                return True
-            awaiting_state.pop(user_id, None)
-            await message.answer("✅ تعداد عکس‌ها بروزرسانی شد.", reply_markup=options_keyboard(pid, pending_files))
-            return True
-
-        if field_name == "thumb_columns":
-            if not message.text:
-                return False
-            text = message.text.strip()
-            if text in ("خودکار", "auto", "0", "-"):
-                pending.options["thumb_columns"] = 0
-            elif text.isdigit() and 1 <= int(text) <= 20:
-                pending.options["thumb_columns"] = int(text)
-            else:
-                await message.answer("لطفاً یک عدد بین 1 تا 20 بفرستید، یا «خودکار».")
-                return True
-            awaiting_state.pop(user_id, None)
-            await message.answer("✅ تعداد ستون بروزرسانی شد.", reply_markup=options_keyboard(pid, pending_files))
-            return True
-
-        if field_name == "title":
-            if not message.text:
-                return False
-            parts = message.text.split("|")
-            pending.options["title"] = parts[0].strip()
-            if len(parts) > 1:
-                pending.options["artist"] = parts[1].strip()
-            awaiting_state.pop(user_id, None)
-            await message.answer("✅ عنوان/خواننده بروزرسانی شد.", reply_markup=options_keyboard(pid, pending_files))
-            return True
-
-        if field_name == "target":
-            chat_id, label = await _resolve_target(message)
-            if chat_id is None:
-                if message.document or message.video or message.audio:
-                    awaiting_state.pop(user_id, None)
-                    await message.answer("⏹ تنظیم مقصد لغو شد؛ این فایل را به‌عنوان کار جدید در نظر می‌گیرم.")
-                    return False
-                await message.answer(
-                    "چت را نشناختم. یک پیام از آن فوروارد کنید، @username یا آیدی عددی چت را بفرستید.\n"
-                    "برای انصراف /cancel را بفرستید."
-                )
-                return True
-            pending.options["target_chat_id"] = chat_id
-            pending.options["target_label"] = label
-            awaiting_state.pop(user_id, None)
-            await message.answer("✅ مقصد بروزرسانی شد.", reply_markup=options_keyboard(pid, pending_files))
-            return True
-
-        if field_name == "parts_count":
-            if not message.text or not message.text.strip().isdigit():
-                await message.answer("لطفاً فقط یک عدد بفرستید (مثلاً 5).")
-                return True
-
-            total = int(message.text.strip())
-
-            if total < 2 or total > 100:
-                await message.answer("تعداد بخش باید بین 2 تا 100 باشد.")
-                return True
-
-            forwarded = await pending.source_message.forward(Telegram.GROUP_ID)
-
-            pending.is_multipart = True
-            pending.parts_total = total
-            pending.part_message_ids = [forwarded.message_id]
-
-            awaiting_state[user_id] = f"file:{pid}:next_part"
-
-            await message.answer(
-                f"✅ بخش ۱ از {total} ثبت شد. لطفاً بخش ۲ را بفرستید."
-            )
-            return True
-
-        if field_name == "archive_password":
-            if not message.text:
-                await message.answer("لطفاً رمز را به‌صورت متن بفرستید.")
-                return True
-
-            skip_words = ("رد", "ندارم", "نمی‌دانم", "نمیدانم", "-")
-            text = message.text.strip()
-
-            if text not in skip_words:
-                pending.options["password"] = text
-                await message.answer("✅ رمز ذخیره شد.")
-            else:
-                pending.options["password"] = ""
-                await message.answer("باشه، رمز تنظیم نشد.")
-
-            awaiting_state.pop(user_id, None)
-
-            await message.answer(
-                "تنظیمات این فایل را بررسی و در صورت نیاز تغییر دهید:",
-                reply_markup=options_keyboard(pid, pending_files),
-            )
-            return True
-
-        if field_name == "next_part":
-
-            # A convenience shortcut: if the user knows the password, they
-            # can just type it here instead of going back to the dedicated
-            # button — it doesn't advance part collection.
-            if message.text and not (message.document or message.video or message.audio):
-                pending.options["password"] = message.text.strip()
-                await message.answer(
-                    f"✅ رمز ذخیره شد. حالا بخش {len(pending.part_message_ids) + 1} را بفرستید."
-                )
-                return True
-
-            file = message.document or message.video or message.audio
-
-            if not file:
-                await message.answer("لطفاً فایل بخش بعدی را بفرستید (یا رمز آرشیو را به‌صورت متن).")
-                return True
-
-            forwarded = await message.forward(Telegram.GROUP_ID)
-            pending.part_message_ids.append(forwarded.message_id)
-
-            received = len(pending.part_message_ids)
-
-            if received < pending.parts_total:
-                await message.answer(
-                    f"✅ بخش {received} از {pending.parts_total} ثبت شد. بخش بعدی را بفرستید."
-                )
-                return True
-
-            awaiting_state.pop(user_id, None)
-
-            await message.answer(
-                f"✅ هر {pending.parts_total} بخش دریافت شد. "
-                "تنظیمات نهایی را بررسی و در صورت نیاز تغییر دهید:",
-                reply_markup=options_keyboard(pid, pending_files),
-            )
-            return True
+        return await handle_file_awaited_input(message, state)
 
     return False
 
@@ -974,6 +329,12 @@ async def handle_private_message(message: Message):
         handled = await handle_awaited_input(message, state)
         if handled:
             return
+
+    # Same tracking/notification as /start and /settings — a user can just
+    # as easily send a file directly as their very first interaction
+    # (this is exactly what happens when testing with qa-userbot, which
+    # sends files straight away without ever sending /start first).
+    await track_pending_user_if_needed(message)
 
     if not is_authorized(user_id):
         await message.answer(not_authorized_text(user_id))
