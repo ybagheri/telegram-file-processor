@@ -1,5 +1,21 @@
 # Architecture
 
+## Module map (`bot.py`'s package structure)
+
+`bot.py` used to be one ~2000-line file. It's now a ~140-line entrypoint that only creates the `Dispatcher`, registers seven aiogram 3 `Router`s in a specific order (see the big comment at the top of `bot.py` for why the order matters — every specific-filter router before the catch-all), and runs `main()`. Everything else lives in:
+
+| Package/file | What's there |
+|---|---|
+| `utils/access_control.py` | `is_admin`/`is_authorized`/`not_authorized_text`, expiry helpers, `track_pending_user_if_needed` |
+| `keyboards/` | Every inline-keyboard builder (`admin.py`, `settings.py`, `files.py`, `photo.py`), plus `constants.py` for shared label data |
+| `models/`, `state.py` | `PendingFile`/`PendingPhoto` dataclasses and every shared in-process dict (`pending_files`, `awaiting_state`, `admin_flow`, etc.) — a single source of truth every handler module imports |
+| `services/` | `access_store.py`, `settings_store.py`, `pending_user_store.py` (all SQLite), `target_resolver.py`, `expiry_reminder.py` — the non-Telegram-routing business logic |
+| `handlers/` | One aiogram Router per domain: `admin.py`, `settings.py`, `files.py`, `photo.py`, `bridge.py`, `core.py` (`/start`, `/cancel`, and the catch-all `handle_private_message`) |
+
+`handle_awaited_input()` (the free-text "what state is this user in" dispatcher) lives in `handlers/core.py`, composing `handle_admin_awaited_input`/`handle_settings_awaited_input`/`handle_file_awaited_input` from the other three handler modules by state-name prefix — deliberately placed there rather than in `bot.py`, so no handler module ever has to import `bot.py` back.
+
+Full history of how this split happened, in order, is in `CLAUDE.md`'s change log under phases 7a–7g — worth reading before doing a large refactor near this code again, since phase 7d found a genuine aiogram router-precedence bug the hard way (a broad catch-all handler beats a more specific sub-router unless it's *also* on its own sub-router, included after the specific ones).
+
 ## Why two processes?
 
 Telegram's Bot API caps file downloads at 20MB (and uploads it handles itself, capped around 50MB for bots vs. 2-4GB for user accounts). To handle real-world course archives (hundreds of MB), `worker.py` logs in as a **real user account** via Telethon, which has none of those limits. `bot.py` stays a normal bot (via aiogram) so it can be added to chats, respond to commands, etc.

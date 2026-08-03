@@ -79,9 +79,22 @@ Send a file to the bot in a private chat. For video, you'll get an inline-keyboa
 ## Project structure
 
 ```
-bot.py                  # user-facing entrypoint (aiogram, Bot API)
+bot.py                  # thin entrypoint: creates the Dispatcher, registers every Router, runs main()
 worker.py                # processing entrypoint (Telethon, user account)
 config.py                # env-backed settings (paths, ffmpeg, telegram, processing profiles)
+state.py                  # shared in-process mutable state (pending files/photos, awaited-input states, admin scratch data)
+
+handlers/                  # one aiogram 3 Router per domain — this is where bot.py's logic actually lives now
+  admin.py                    # /admin, admin:* callbacks, admin_* awaited-input states
+  settings.py                  # /settings, s:*/sq:*/slogopos:*/starget:* callbacks, settings_* states
+  files.py                      # quality/options/target callbacks, finalize_job, file:* states
+  photo.py                       # plain photo -> watermark confirmation flow
+  bridge.py                       # messages coming back from worker.py through the bridge group
+  core.py                          # /start, /cancel, the catch-all handle_private_message, handle_awaited_input
+
+keyboards/                  # every inline-keyboard builder, grouped the same way as handlers/
+models/                       # PendingFile / PendingPhoto dataclasses
+utils/                          # small helpers: file-type sniffing, EXCLUDE text stripping, access-control checks
 
 core/                    # shared, framework-agnostic building blocks
   job.py                 # Job + OutputFile dataclasses (the unit of work)
@@ -94,8 +107,10 @@ core/                    # shared, framework-agnostic building blocks
 
 dispatcher/dispatcher.py   # routes a Job to the right registered processor
 processors/                 # one file per file-type handler (video/audio/pdf/archive)
-services/                    # Telegram I/O, ffmpeg wrapper, tagging, per-user settings storage
-utils/                         # small stateless helpers (file-type sniffing, EXCLUDE text stripping)
+services/                    # Telegram I/O, ffmpeg wrapper, tagging, SQLite-backed stores (access/settings/pending-user), target resolution, expiry reminders
+
+tests/                        # pytest suite for every pure-logic module above (no live Telegram needed)
+qa-userbot/                     # separate tool: a real Telegram user account for live end-to-end testing (see its own README)
 ```
 
 ### Adding a new file type

@@ -15,6 +15,7 @@
 - [x] Small pytest suite for the pure-logic modules (`access_store`, `settings_store`, `core/protocol.py`, `core/job_options.py`) — see `tests/`
 - [x] Live end-to-end QA tool: a real Telegram user account that sends test media to the actual bot and clicks through its keyboards — see `qa-userbot/` (run by you, not from this sandbox)
 - [x] Track users who `/start` without registering (separate `pending_users` table) and DM every admin once per new one; entry is removed once the admin actually registers them
+- [x] Split `bot.py` into smaller handler modules (`utils/`, `keyboards/`, `models/`, `state.py`, `services/`, `handlers/` — aiogram 3 Router-based). `bot.py`: 2021 → 143 lines. See phases 7a-7g in `CLAUDE.md`'s change log.
 - [x] Watermark-only flow for plain photos (not just video)
 - [x] Video → MP3 / M4A / voice note extraction
 - [x] Audio re-tagging (title, artist, cover)
@@ -29,7 +30,6 @@
 
 ## Planned / ideas
 
-- [ ] Split `bot.py` into smaller handler modules (admin / settings / file-flow) — deliberately deferred as its own phase; see the phase 5a change-log entry in `CLAUDE.md` for why
 - [ ] Broadcast a message to everyone in `pending_users` (not yet built — the table just tracks the data for this)
 - [ ] Simple pending-vs-registered conversion count/report for the admin
 - [ ] Multiple saved delivery targets per user (currently one "custom" target at a time)
@@ -40,3 +40,4 @@
 - [ ] Per-file progress reporting for very large archives
 - [ ] Optional virus/malware scanning before delivery
 - [ ] Docker packaging (Dockerfile/docker-compose for the two long-running processes)
+- [ ] Pytest coverage for `processors/archive.py`'s and `services/media.py`'s pure logic (not covered by the `bot.py` module-split effort, since it never needed to touch them)

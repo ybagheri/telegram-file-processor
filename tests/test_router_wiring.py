@@ -255,6 +255,44 @@ async def test_plain_text_message_reaches_catchall_router(api_calls):
 
 
 @pytest.mark.asyncio
+async def test_cancel_command_reaches_core_router(api_calls):
+    non_admin_id = 555111225
+    chat = Chat(id=non_admin_id, type="private")
+    user = TgUser(id=non_admin_id, is_bot=False, first_name="Regular")
+
+    msg = Message(message_id=1, date=int(time.time()), chat=chat, from_user=user, text="/cancel")
+    update = Update(update_id=1, message=msg)
+
+    await bot_module.dp.feed_update(bot_module.bot, update)
+
+    sent = _sent_messages(api_calls)
+    assert len(sent) == 1, f"expected /cancel to reach cancel_command, got {api_calls}"
+    assert "لغو" in sent[0].text
+
+
+@pytest.mark.asyncio
+async def test_bridge_message_reaches_bridge_router(api_calls, monkeypatch):
+    from core.protocol import Protocol
+
+    non_admin_id = 555111226
+    target_chat = Chat(id=int(bot_module.Telegram.GROUP_ID), type="supergroup")
+    from_user = TgUser(id=999, is_bot=False, first_name="Worker")
+
+    payload = Protocol.create_info(user_id=non_admin_id, job_id="job1", message="در حال پردازش...")
+    text = Protocol.encode(payload)
+
+    msg = Message(message_id=1, date=int(time.time()), chat=target_chat, from_user=from_user, text=text)
+    update = Update(update_id=1, message=msg)
+
+    await bot_module.dp.feed_update(bot_module.bot, update)
+
+    sent = _sent_messages(api_calls)
+    assert len(sent) == 1, f"expected bridge INFO message to reach handle_bridge_message, got {api_calls}"
+    assert sent[0].chat_id == non_admin_id
+    assert "در حال پردازش" in sent[0].text
+
+
+@pytest.mark.asyncio
 async def test_unauthorized_user_sending_a_file_directly_still_notifies_admins(api_calls, monkeypatch):
     """Regression test for a real reported bug: the pending-user admin
     notification originally only lived inside the /start handler. A user
