@@ -17,8 +17,10 @@ from aiogram.filters import Command
 from aiogram.types import CallbackQuery, InlineKeyboardButton, InlineKeyboardMarkup, Message
 
 from keyboards.admin import admin_panel_keyboard, duration_keyboard, confirm_keyboard
+from core.logger import get_logger
 from services.access_store import access_store
 from services.pending_user_store import pending_user_store
+from services.telegram import telegram_service
 from utils.access_control import (
     is_admin,
     not_authorized_text,
@@ -30,6 +32,8 @@ from utils.access_control import (
 from state import awaiting_state, admin_flow
 
 router = Router(name="admin")
+logger = get_logger(__name__)
+bot = telegram_service.bot
 
 
 # ======================================================================
@@ -352,6 +356,72 @@ async def admin_manage_delete(callback: CallbackQuery):
     await callback.answer()
 
 
+@router.callback_query(F.data == "admin:broadcast_pending")
+async def admin_broadcast_pending(callback: CallbackQuery):
+    if not is_admin(callback.from_user.id):
+        await callback.answer("اجازه‌ی این کار را ندارید.", show_alert=True)
+        return
+
+    count = len(pending_user_store.list_all())
+
+    if count == 0:
+        await callback.message.answer("در حال حاضر هیچ کاربر ثبت‌نام‌نشده‌ای برای ارسال پیام وجود ندارد.")
+        await callback.answer()
+        return
+
+    awaiting_state[callback.from_user.id] = "admin_broadcast_pending_text"
+    await callback.message.answer(
+        f"متن پیامی که می‌خواهید به {count} کاربر ثبت‌نام‌نشده ارسال شود را بفرستید.\n"
+        "برای انصراف /cancel را بفرستید."
+    )
+    await callback.answer()
+
+
+@router.callback_query(F.data == "admin:broadcast_confirm")
+async def admin_broadcast_confirm(callback: CallbackQuery):
+    if not is_admin(callback.from_user.id):
+        await callback.answer("اجازه‌ی این کار را ندارید.", show_alert=True)
+        return
+
+    flow = admin_flow.pop(callback.from_user.id, {})
+    text = flow.get("broadcast_text")
+
+    if not text:
+        await callback.message.answer("متنی برای ارسال پیدا نشد؛ دوباره تلاش کنید.")
+        await callback.answer()
+        return
+
+    recipients = pending_user_store.list_all()
+    sent_count = 0
+    failed_count = 0
+
+    for uid_str in recipients:
+        try:
+            await bot.send_message(int(uid_str), text)
+            sent_count += 1
+        except Exception:
+            failed_count += 1
+            logger.warning("Could not deliver broadcast message to pending user %s", uid_str)
+
+    await callback.message.answer(
+        f"✅ پیام همگانی ارسال شد.\n"
+        f"موفق: {sent_count}\n"
+        f"ناموفق: {failed_count} (احتمالاً ربات را بلاک کرده‌اند)"
+    )
+    await callback.answer()
+
+
+@router.callback_query(F.data == "admin:broadcast_cancel")
+async def admin_broadcast_cancelled(callback: CallbackQuery):
+    if not is_admin(callback.from_user.id):
+        await callback.answer("اجازه‌ی این کار را ندارید.", show_alert=True)
+        return
+
+    admin_flow.pop(callback.from_user.id, None)
+    await callback.message.answer("لغو شد؛ پیامی ارسال نشد.")
+    await callback.answer()
+
+
 # ======================================================================
 # Awaited-input states (admin_*) — called from bot.py's handle_awaited_input
 # ======================================================================
@@ -563,6 +633,33 @@ async def handle_admin_awaited_input(message: Message, state: str) -> bool:
                 confirm_data=f"admin:delete_confirm:{target_id}",
                 cancel_data="admin:delete_cancel",
                 confirm_label="🗑 بله، حذف کن",
+            ),
+        )
+        return True
+
+    if state == "admin_broadcast_pending_text":
+
+        if not is_admin(user_id):
+            awaiting_state.pop(user_id, None)
+            admin_flow.pop(user_id, None)
+            return False
+
+        if not message.text:
+            await message.answer("لطفاً متن پیام را به‌صورت متن بفرستید.")
+            return True
+
+        count = len(pending_user_store.list_all())
+        admin_flow[user_id] = {"broadcast_text": message.text}
+        awaiting_state.pop(user_id, None)
+
+        await message.answer(
+            f"این پیام به {count} کاربر ثبت‌نام‌نشده ارسال خواهد شد:\n\n"
+            f"{message.text}\n\n"
+            "آیا مطمئنید؟",
+            reply_markup=confirm_keyboard(
+                confirm_data="admin:broadcast_confirm",
+                cancel_data="admin:broadcast_cancel",
+                confirm_label="📢 بله، ارسال کن",
             ),
         )
         return True

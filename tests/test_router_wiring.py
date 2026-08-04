@@ -100,6 +100,32 @@ async def test_admin_callback_reaches_admin_router(api_calls):
 
 
 @pytest.mark.asyncio
+async def test_admin_broadcast_callback_reaches_admin_router(api_calls):
+    from services.pending_user_store import pending_user_store
+    pending_user_store._conn.execute("DELETE FROM pending_users")
+    pending_user_store._conn.commit()
+    await pending_user_store.record_start(999888, first_name="Someone")
+
+    chat = Chat(id=ADMIN_ID, type="private")
+    user = TgUser(id=ADMIN_ID, is_bot=False, first_name="Admin")
+    cb_message = Message(
+        message_id=3, date=int(time.time()), chat=chat, from_user=user,
+        text="⚙️ پنل مدیریت کاربران:",
+    )
+    callback = CallbackQuery(
+        id="cbq5", from_user=user, chat_instance="abc",
+        data="admin:broadcast_pending", message=cb_message,
+    )
+    update = Update(update_id=5, callback_query=callback)
+
+    await bot_module.dp.feed_update(bot_module.bot, update)
+
+    sent = _sent_messages(api_calls)
+    assert len(sent) == 1, f"expected one prompt for the broadcast text, got {api_calls}"
+    assert "1" in sent[0].text
+
+
+@pytest.mark.asyncio
 async def test_settings_command_reaches_settings_router_not_the_catchall(api_calls):
     non_admin_id = 555111222
     chat = Chat(id=non_admin_id, type="private")

@@ -10,12 +10,12 @@ def _flat_buttons(markup):
     return [b for row in markup.inline_keyboard for b in row]
 
 
-def test_admin_panel_keyboard_has_all_five_actions():
+def test_admin_panel_keyboard_has_all_six_actions():
     kb = admin_panel_keyboard()
     callback_datas = {b.callback_data for b in _flat_buttons(kb)}
     assert callback_datas == {
         "admin:add_user", "admin:list_users", "admin:renew_user",
-        "admin:toggle_user", "admin:delete_user",
+        "admin:toggle_user", "admin:delete_user", "admin:broadcast_pending",
     }
 
 

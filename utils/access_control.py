@@ -15,6 +15,7 @@ from __future__ import annotations
 
 import time
 from datetime import datetime
+from html import escape as html_escape
 
 from aiogram.types import Message
 
@@ -107,22 +108,27 @@ def _user_display(target_id: int, info: dict | None) -> str:
 async def notify_admins_of_new_pending_user(tg_user):
     """DM every configured admin once, the first time someone `/start`s
     the bot without being registered in `access_store` yet — so the admin
-    finds out about interested users without having to check anything."""
-    full_name = (tg_user.full_name or "").strip() or "—"
-    username = f"@{tg_user.username}" if tg_user.username else "ندارد"
+    finds out about interested users without having to check anything.
+
+    The Telegram ID is wrapped in <code> (HTML) so Telegram renders it as
+    monospaced, tap-to-copy text — the admin needs to paste this exact id
+    into the "add user" flow, so making it a single tap to copy avoids a
+    transcription mistake."""
+    full_name = html_escape((tg_user.full_name or "").strip() or "—")
+    username = f"@{html_escape(tg_user.username)}" if tg_user.username else "ندارد"
     when = datetime.fromtimestamp(time.time()).strftime("%Y-%m-%d %H:%M")
 
     text = (
         "🆕 کاربر جدید ربات\n\n"
         f"👤 نام:\n{full_name}\n\n"
         f"🔹 یوزرنیم:\n{username}\n\n"
-        f"🆔 Telegram ID:\n{tg_user.id}\n\n"
+        f"🆔 Telegram ID:\n<code>{tg_user.id}</code>\n\n"
         f"⏰ زمان:\n{when}"
     )
 
     for admin_id in Telegram.ADMIN_IDS:
         try:
-            await bot.send_message(admin_id, text)
+            await bot.send_message(admin_id, text, parse_mode="HTML")
         except Exception:
             logger.warning("Could not notify admin %s about new pending user %s", admin_id, tg_user.id)
 
