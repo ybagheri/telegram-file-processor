@@ -422,6 +422,50 @@ async def admin_broadcast_cancelled(callback: CallbackQuery):
     await callback.answer()
 
 
+@router.callback_query(F.data == "admin:stats")
+async def admin_stats(callback: CallbackQuery):
+    if not is_admin(callback.from_user.id):
+        await callback.answer("اجازه‌ی این کار را ندارید.", show_alert=True)
+        return
+
+    registered = access_store.list_all()
+    pending = pending_user_store.list_all()
+
+    active_count = 0
+    expired_count = 0
+    disabled_count = 0
+
+    for info in registered.values():
+        if not info.get("active", True):
+            disabled_count += 1
+        elif access_store.is_expired(info):
+            expired_count += 1
+        else:
+            active_count += 1
+
+    total_registered = len(registered)
+    total_pending = len(pending)
+    total_seen = total_registered + total_pending
+
+    if total_seen > 0:
+        conversion_rate = f"{(total_registered / total_seen) * 100:.1f}٪"
+    else:
+        conversion_rate = "—"
+
+    text = (
+        "📊 آمار کاربران\n\n"
+        f"✅ کاربران مجاز (ثبت‌شده): {total_registered}\n"
+        f"　　فعال: {active_count}\n"
+        f"　　منقضی: {expired_count}\n"
+        f"　　غیرفعال: {disabled_count}\n\n"
+        f"🕓 کاربران ثبت‌نام‌نشده (pending): {total_pending}\n\n"
+        f"📈 نرخ تبدیل (ثبت‌شده از کل کسانی که ربات را دیده‌اند): {conversion_rate}"
+    )
+
+    await callback.message.answer(text)
+    await callback.answer()
+
+
 # ======================================================================
 # Awaited-input states (admin_*) — called from bot.py's handle_awaited_input
 # ======================================================================

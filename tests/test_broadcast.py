@@ -189,3 +189,38 @@ async def test_admin_broadcast_button_reaches_admin_router_via_real_dispatch(mon
     sent = [c for c in calls if isinstance(c, SendMessage)]
     assert len(sent) == 1
     assert "1" in sent[0].text
+
+
+@pytest.mark.asyncio
+async def test_admin_stats_reports_registered_and_pending_breakdown():
+    import time as time_module
+
+    await access_store.add(1, name="Active", expires_at=None)
+    await access_store.add(2, name="Expired", expires_at=time_module.time() - 10)
+    await access_store.add(3, name="Disabled", expires_at=None)
+    await access_store.set_active(3, False)
+
+    await pending_user_store.record_start(701, first_name="Pending1")
+    await pending_user_store.record_start(702, first_name="Pending2")
+
+    cb = FakeCallback("admin:stats", ADMIN_ID)
+    await bot_module.admin_stats(cb)
+
+    text = cb.message.answers[-1]
+    assert "کاربران مجاز" in text
+    assert "3" in text  # total registered
+    assert "فعال: 1" in text
+    assert "منقضی: 1" in text
+    assert "غیرفعال: 1" in text
+    assert "2" in text  # total pending
+    # conversion rate: 3 registered out of 5 total seen = 60.0%
+    assert "60.0" in text
+
+
+@pytest.mark.asyncio
+async def test_admin_stats_with_no_users_at_all_does_not_crash():
+    cb = FakeCallback("admin:stats", ADMIN_ID)
+    await bot_module.admin_stats(cb)
+    text = cb.message.answers[-1]
+    assert "0" in text
+    assert "—" in text  # conversion rate undefined with zero users

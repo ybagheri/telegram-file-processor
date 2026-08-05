@@ -15,6 +15,7 @@ def admin_panel_keyboard() -> InlineKeyboardMarkup:
         [InlineKeyboardButton(text="🚫 فعال/غیرفعال کردن کاربر", callback_data="admin:toggle_user")],
         [InlineKeyboardButton(text="🗑 حذف کامل کاربر", callback_data="admin:delete_user")],
         [InlineKeyboardButton(text="📢 پیام همگانی به ثبت‌نام‌نشده‌ها", callback_data="admin:broadcast_pending")],
+        [InlineKeyboardButton(text="📊 آمار کاربران", callback_data="admin:stats")],
     ])
 
 

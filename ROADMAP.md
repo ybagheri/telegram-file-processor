@@ -17,6 +17,7 @@
 - [x] Track users who `/start` without registering (separate `pending_users` table) and DM every admin once per new one; entry is removed once the admin actually registers them
 - [x] Split `bot.py` into smaller handler modules (`utils/`, `keyboards/`, `models/`, `state.py`, `services/`, `handlers/` — aiogram 3 Router-based). `bot.py`: 2021 → 143 lines. See phases 7a-7g in `CLAUDE.md`'s change log.
 - [x] Broadcast a message to everyone in `pending_users` — admin panel button, with a preview/confirm step and success/failure reporting
+- [x] Simple pending-vs-registered conversion count/report for the admin — "📊 آمار کاربران" panel button
 - [x] Watermark-only flow for plain photos (not just video)
 - [x] Video → MP3 / M4A / voice note extraction
 - [x] Audio re-tagging (title, artist, cover)
@@ -31,7 +32,6 @@
 
 ## Planned / ideas
 
-- [ ] Simple pending-vs-registered conversion count/report for the admin
 - [ ] Multiple saved delivery targets per user (currently one "custom" target at a time)
 - [ ] Image processing (resize/compress/watermark) as its own processor
 - [ ] OCR for scanned PDFs

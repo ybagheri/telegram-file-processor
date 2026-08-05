@@ -70,6 +70,7 @@ from handlers.admin import (
     admin_broadcast_pending,
     admin_broadcast_confirm,
     admin_broadcast_cancelled,
+    admin_stats,
     handle_admin_awaited_input,
 )
 from handlers.settings import (
