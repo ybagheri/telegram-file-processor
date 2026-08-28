@@ -1,10 +1,11 @@
 import asyncio
 import re
+import shutil
 
 from telethon import events
 from telethon.errors import FloodWaitError
 
-from config import Processing, Telegram
+from config import Paths, Processing, Telegram
 from core.constants import MessageType
 from core.delivery import upload_entry
 from core.job import Job
@@ -62,6 +63,71 @@ def _file_too_large_message(size_bytes: int) -> str:
         f"حجم فایل ({size_gb:.1f} گیگابایت) بیشتر از حد مجاز "
         f"({limit_gb:.1f} گیگابایت) است."
     )
+
+
+def _required_headroom(declared_size: int) -> int:
+    """Working space demanded before we'll start downloading a file of
+    the given declared size. 0 = "small enough that the check would be
+    noise, skip it" — consistent with the disk-conscious streaming
+    approach in processors/archive.py (which never holds the whole
+    extracted tree at once), we only pre-check that there's room for the
+    input plus a safety factor of working space (ffmpeg output,
+    extraction), not for every hypothetical expansion."""
+
+    if declared_size <= Processing.DISK_SPACE_CHECK_THRESHOLD:
+        return 0
+
+    return int(declared_size * Processing.DISK_SPACE_SAFETY_FACTOR)
+
+
+def _has_enough_disk_space(declared_size: int) -> bool:
+    """True when every path the job will write to (DOWNLOADS, TEMP,
+    OUTPUTS) has at least the required headroom free. They all normally
+    sit on the same filesystem, but they're checked individually so a
+    deployment that bind-mounts one of them separately is still guarded."""
+
+    headroom = _required_headroom(declared_size)
+
+    if headroom <= 0:
+        return True
+
+    for path in (Paths.DOWNLOADS, Paths.TEMP, Paths.OUTPUTS):
+
+        free = shutil.disk_usage(path).free
+
+        if free < headroom:
+
+            logger.warning(
+                "Low disk space on %s: %s bytes free, need %s",
+                path,
+                free,
+                headroom,
+            )
+            return False
+
+    return True
+
+
+async def _reject_no_disk_space(job: Job, declared_size: int):
+
+    logger.warning(
+        "Job %s rejected: not enough free disk space for a %s-byte file",
+        job.job_id,
+        declared_size,
+    )
+
+    await telegram_service.send_error(
+        Protocol.create_error(
+            user_id=job.user_id,
+            job_id=job.job_id,
+            message=(
+                "فضای دیسک سرور برای پردازش این فایل کافی نیست. "
+                "لطفاً بعداً دوباره تلاش کنید."
+            ),
+        )
+    )
+
+    job.cleanup()
 
 
 async def _reject_too_large(job: Job, size_bytes: int):
@@ -140,6 +206,12 @@ async def process_job(payload: dict):
         await _reject_too_large(job, job.file_size)
         return
 
+    # Free-disk-space guard: don't even start downloading if there isn't
+    # headroom for the input plus working space (ffmpeg/extraction).
+    if not _has_enough_disk_space(job.file_size):
+        await _reject_no_disk_space(job, job.file_size)
+        return
+
     input_path = job.input_dir / filename
 
     job.input_file = await telegram_service.download(
@@ -213,6 +285,13 @@ async def process_multipart_job(payload: dict, part_ids: list[int]):
 
     if total_size > Processing.MAX_FILE_SIZE:
         await _reject_too_large(job, total_size)
+        return
+
+    # Same free-disk-space guard, sized from the declared *total* of the
+    # volume set (volumes download on demand, but extraction output and
+    # the sum of the parts still have to fit alongside each other).
+    if not _has_enough_disk_space(total_size):
+        await _reject_no_disk_space(job, total_size)
         return
 
     success = False

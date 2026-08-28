@@ -54,6 +54,14 @@ def stub_telegram(monkeypatch):
     async def fake_get_messages(*args, **kwargs):
         raise AssertionError("get_messages must not be called before the guard")
 
+    # Plenty of free disk by default, so only the size guard is exercised
+    # unless a test overrides this (see the disk-space tests below).
+    monkeypatch.setattr(
+        worker_module.shutil,
+        "disk_usage",
+        lambda path: SimpleNamespace(free=1024**4),
+    )
+
     monkeypatch.setattr(worker_module.telegram_service, "send_error", fake_send_error)
     monkeypatch.setattr(worker_module.telegram_service, "download", fake_download)
     monkeypatch.setattr(
@@ -149,3 +157,86 @@ def test_file_too_large_message_mentions_both_sizes():
     message = worker_module._file_too_large_message(size)
 
     assert "حد مجاز" in message
+
+
+# ======================================================================
+# Free-disk-space guard
+# ======================================================================
+
+
+def test_required_headroom_is_zero_below_threshold(monkeypatch):
+
+    monkeypatch.setattr(Processing, "DISK_SPACE_CHECK_THRESHOLD", 1000)
+    monkeypatch.setattr(Processing, "DISK_SPACE_SAFETY_FACTOR", 2.0)
+
+    assert worker_module._required_headroom(1000) == 0
+    assert worker_module._required_headroom(500) == 0
+
+
+def test_required_headroom_applies_safety_factor(monkeypatch):
+
+    monkeypatch.setattr(Processing, "DISK_SPACE_CHECK_THRESHOLD", 1000)
+    monkeypatch.setattr(Processing, "DISK_SPACE_SAFETY_FACTOR", 2.5)
+
+    assert worker_module._required_headroom(2000) == 5000
+
+
+async def test_low_disk_space_rejects_job_before_download(
+    job_dirs, stub_telegram, monkeypatch
+):
+
+    monkeypatch.setattr(Processing, "DISK_SPACE_CHECK_THRESHOLD", 1000)
+    monkeypatch.setattr(Processing, "DISK_SPACE_SAFETY_FACTOR", 2.0)
+
+    # Only 1500 bytes free: enough to notice, not enough for the
+    # 2x safety factor on a 1000-byte file.
+    monkeypatch.setattr(
+        worker_module.shutil,
+        "disk_usage",
+        lambda path: SimpleNamespace(free=1500),
+    )
+
+    async def fake_get_messages(*args, **kwargs):
+        return _fake_media_message(size=2000)
+
+    worker_module.telegram_service.client.get_messages = fake_get_messages
+
+    await worker_module.process_job(
+        {"user_id": 42, "message_id": 1, "options": {}}
+    )
+
+    assert len(stub_telegram) == 1
+    assert stub_telegram[0]["type"] == MessageType.ERROR.value
+    assert "دیسک" in stub_telegram[0]["message"]
+
+
+async def test_small_files_skip_the_disk_check(
+    job_dirs, stub_telegram, monkeypatch
+):
+
+    monkeypatch.setattr(Processing, "DISK_SPACE_CHECK_THRESHOLD", 1000)
+
+    # Even a report of ~zero free space must NOT block a file below the
+    # threshold — the check is intentionally skipped for small inputs.
+    monkeypatch.setattr(
+        worker_module.shutil,
+        "disk_usage",
+        lambda path: SimpleNamespace(free=10),
+    )
+
+    async def fake_get_messages(*args, **kwargs):
+        return _fake_media_message(size=500)
+
+    worker_module.telegram_service.client.get_messages = fake_get_messages
+
+    async def fake_download(message, destination):
+        return None  # "download failed" — proves it got past the guard
+
+    worker_module.telegram_service.download = fake_download
+
+    await worker_module.process_job(
+        {"user_id": 42, "message_id": 1, "options": {}}
+    )
+
+    assert len(stub_telegram) == 1
+    assert "دیسک" not in stub_telegram[0]["message"]

@@ -175,6 +175,30 @@ class Processing:
         )
     )
 
+    # Only bother checking free disk space for files whose declared size
+    # is above this threshold — small files can't meaningfully fill the
+    # disk, and the check would be noise for them.
+    DISK_SPACE_CHECK_THRESHOLD = int(
+        os.getenv(
+            "DISK_SPACE_CHECK_THRESHOLD",
+            str(
+                256 * 1024 * 1024
+            ),
+        )
+    )
+
+    # How much working space we demand per declared byte (checked against
+    # shutil.disk_usage on DOWNLOADS/TEMP/OUTPUTS before download starts).
+    # > 1 because ffmpeg re-encoding and archive extraction both need
+    # room for the output *in addition to* the raw input, and archives
+    # can expand well past their compressed size.
+    DISK_SPACE_SAFETY_FACTOR = float(
+        os.getenv(
+            "DISK_SPACE_SAFETY_FACTOR",
+            "2.0",
+        )
+    )
+
     DELETE_JOB_AFTER_FINISH = (
         os.getenv(
             "DELETE_JOB_AFTER_FINISH",

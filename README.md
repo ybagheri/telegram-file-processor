@@ -63,6 +63,8 @@ pip install -r requirements.txt
 | `ADMIN_IDS` | *(optional)* Comma-separated numeric chat IDs of the bot admin(s). Leave empty to let anyone use the bot |
 | `ADMIN_CONTACT_USERNAME` | *(optional)* Shown to unauthorized users so they know who to contact for access, e.g. `@your_admin` |
 | `MAX_FILE_SIZE` | *(optional)* Maximum accepted file size in bytes (default: 5 GiB). Files whose declared Telegram size exceeds this are rejected by the worker **before** download starts, and the user gets a Persian error message |
+| `DISK_SPACE_CHECK_THRESHOLD` | *(optional)* Only run the free-disk-space guard for files whose declared size exceeds this, in bytes (default: 256 MiB). Smaller files skip the check entirely |
+| `DISK_SPACE_SAFETY_FACTOR` | *(optional)* How many bytes of free space must be available per declared input byte before a large file may be downloaded (default: `2.0`) — ffmpeg re-encoding and archive extraction need working space beyond the raw input. Checked against `shutil.disk_usage` on the `downloads/`, `temp/` and `outputs/` paths |
 
 When `ADMIN_IDS` is set, an admin gets `/admin` — a panel to add a user (choosing how long their access lasts: 1 week / 3 months / 6 months / 1 year / unlimited), renew/change someone's expiry later, or enable/disable a user without losing their record. Users can be identified either by forwarding one of their messages or by typing their numeric id directly (in which case the admin can optionally attach a name/username by hand). This data lives in a small SQLite database (`config_data/access.db`), not a plain file.
 
@@ -77,7 +79,7 @@ python worker.py
 
 Send a file to the bot in a private chat. For video, you'll get an inline-keyboard prompt for quality/format (144p–720p, MP3, M4A, voice note); every file type then gets a review screen (rename, thumbnail, watermark, caption, delivery target) before you confirm. Use `/settings` any time to change your defaults.
 
-Files larger than `MAX_FILE_SIZE` (default 5 GiB) are rejected immediately — before anything is downloaded — and you'll get a clear Persian error instead.
+Files larger than `MAX_FILE_SIZE` (default 5 GiB) are rejected immediately — before anything is downloaded — and you'll get a clear Persian error instead. For large files (over `DISK_SPACE_CHECK_THRESHOLD`, default 256 MiB) the worker also verifies the server actually has enough free disk space (declared size × `DISK_SPACE_SAFETY_FACTOR`) before downloading; if it doesn't, you'll get a "not enough disk space" error rather than a mid-processing failure.
 
 ## Project structure
 
