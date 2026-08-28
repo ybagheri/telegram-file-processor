@@ -207,6 +207,16 @@ class Processing:
         == "true"
     )
 
+    # At most this many jobs run ffmpeg/extraction at once on the VPS;
+    # the rest queue on an asyncio.Semaphore instead of launching
+    # unbounded parallel processing.
+    MAX_CONCURRENT_JOBS = int(
+        os.getenv(
+            "MAX_CONCURRENT_JOBS",
+            "2",
+        )
+    )
+
     VIDEO_PROFILES = {
 
         "144": {

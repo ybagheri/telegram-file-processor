@@ -153,6 +153,32 @@ async def _reject_too_large(job: Job, size_bytes: int):
     job.cleanup()
 
 
+# Lazily-created per-job processing semaphore (see
+# _get_processing_semaphore). Module-level so both process_job and
+# process_multipart_job share one limit.
+_processing_semaphore: asyncio.Semaphore | None = None
+
+
+def _get_processing_semaphore() -> asyncio.Semaphore:
+    """The semaphore bounding how many jobs run ffmpeg/extraction at
+    once. Created lazily from Processing.MAX_CONCURRENT_JOBS rather than
+    at import time so tests can retune the limit by resetting
+    worker._processing_semaphore to None."""
+
+    global _processing_semaphore
+
+    if _processing_semaphore is None:
+
+        _processing_semaphore = asyncio.Semaphore(
+            max(
+                1,
+                Processing.MAX_CONCURRENT_JOBS,
+            )
+        )
+
+    return _processing_semaphore
+
+
 async def process_job(payload: dict):
 
     part_ids = payload.get("part_message_ids")
@@ -236,7 +262,14 @@ async def process_job(payload: dict):
     error_message = "Processing failed"
 
     try:
-        success = await dispatcher.dispatch(job)
+        # The semaphore wraps ONLY the processing step (ffmpeg/extract —
+        # the CPU/IO-heavy part), not the download. asyncio.Semaphore
+        # wakes waiters FIFO, and bridge events spawn these tasks in
+        # arrival order, so queued jobs still process in the order they
+        # arrived. An exception here propagates through the `async with`
+        # and releases the slot — one broken job can't starve the rest.
+        async with _get_processing_semaphore():
+            success = await dispatcher.dispatch(job)
     except Exception as e:
         logger.exception("Unhandled error while dispatching job %s", job.job_id)
         success = False
@@ -298,7 +331,10 @@ async def process_multipart_job(payload: dict, part_ids: list[int]):
     error_message = "Processing failed"
 
     try:
-        success = await archive_processor.process_multivolume(job, messages)
+        # Same processing semaphore as single-file jobs — a multi-volume
+        # extraction is at least as heavy as anything it competes with.
+        async with _get_processing_semaphore():
+            success = await archive_processor.process_multivolume(job, messages)
     except Exception as e:
         logger.exception("Unhandled error while processing multipart job %s", job.job_id)
         success = False
