@@ -149,6 +149,20 @@ class Protocol:
         }
 
     @staticmethod
+    def create_heartbeat(
+        *,
+        sender: str = "worker",
+    ) -> dict:
+        """Worker liveness ping. Deliberately carries NO user_id — the
+        bot's bridge handler must never treat it as something to relay
+        to an end user; it only updates the "worker last seen" tracker."""
+
+        return {
+            "type": MessageType.HEARTBEAT,
+            "sender": sender,
+        }
+
+    @staticmethod
     def create_done(
         *,
         user_id: int,

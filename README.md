@@ -68,6 +68,7 @@ pip install -r requirements.txt
 | `MAX_CONCURRENT_JOBS` | *(optional)* How many jobs may run the heavy processing step (ffmpeg re-encode / archive extraction) at the same time (default: `2`). Additional jobs queue and are processed in arrival order; downloads are not counted against this limit |
 | `RATE_LIMIT_MAX_FILES` | *(optional)* Per-user submission cap: at most this many new files per `RATE_LIMIT_WINDOW_MINUTES` (default: `5`). Set to `0` to disable rate limiting entirely. Over-the-cap submissions get a friendly Persian "wait a bit" message instead of being processed |
 | `RATE_LIMIT_WINDOW_MINUTES` | *(optional)* Sliding-window size (in minutes) for the per-user submission cap (default: `10`) |
+| `HEARTBEAT_INTERVAL_SECONDS` | *(optional)* How often (in seconds) the worker sends a liveness "heartbeat" through the bridge group (default: `300`). The admin's `/status` command reports how recent the last heartbeat was, so a crashed worker is noticeable without SSHing in |
 
 When `ADMIN_IDS` is set, an admin gets `/admin` — a panel to add a user (choosing how long their access lasts: 1 week / 3 months / 6 months / 1 year / unlimited), renew/change someone's expiry later, or enable/disable a user without losing their record. Users can be identified either by forwarding one of their messages or by typing their numeric id directly (in which case the admin can optionally attach a name/username by hand). This data lives in a small SQLite database (`config_data/access.db`), not a plain file.
 
@@ -81,6 +82,8 @@ python worker.py
 ## Usage
 
 Send a file to the bot in a private chat. For video, you'll get an inline-keyboard prompt for quality/format (144p–720p, MP3, M4A, voice note); every file type then gets a review screen (rename, thumbnail, watermark, caption, delivery target) before you confirm. Use `/settings` any time to change your defaults.
+
+**Admins** additionally have `/admin` (the user-management panel) and `/status` — a liveness check on the worker process, driven by the heartbeat the worker sends through the bridge every `HEARTBEAT_INTERVAL_SECONDS`. `/status` says whether the worker has been seen recently, so a crashed worker is noticeable without SSHing into the server.
 
 Files larger than `MAX_FILE_SIZE` (default 5 GiB) are rejected immediately — before anything is downloaded — and you'll get a clear Persian error instead. For large files (over `DISK_SPACE_CHECK_THRESHOLD`, default 256 MiB) the worker also verifies the server actually has enough free disk space (declared size × `DISK_SPACE_SAFETY_FACTOR`) before downloading; if it doesn't, you'll get a "not enough disk space" error rather than a mid-processing failure.
 

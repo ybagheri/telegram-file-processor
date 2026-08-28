@@ -295,6 +295,18 @@ class Logging:
     )
 
 
+class Heartbeat:
+
+    # How often (seconds) the worker sends a liveness ping through the
+    # bridge group; bot.py's /status uses it to notice a crashed worker.
+    INTERVAL_SECONDS = int(
+        os.getenv(
+            "HEARTBEAT_INTERVAL_SECONDS",
+            "300",
+        )
+    )
+
+
 class RateLimiting:
 
     # Per-user submission cap: at most MAX_FILES new file submissions per

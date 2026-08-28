@@ -11,6 +11,7 @@ precedence risk for this one.
 """
 from html import escape as html_escape
 from pathlib import Path
+import time
 
 from aiogram import F, Router
 from aiogram.types import Message
@@ -21,7 +22,7 @@ from core.logger import get_logger
 from core.protocol import Protocol
 from services.settings_store import settings_store
 from services.telegram import telegram_service
-from state import job_folder_links, pending_passwords
+from state import job_folder_links, pending_passwords, worker_last_seen
 
 router = Router(name="bridge")
 logger = get_logger(__name__)
@@ -58,6 +59,16 @@ async def handle_bridge_message(message: Message):
 
     message_type = payload.get("type")
     user_id = payload.get("user_id")
+
+    # Worker liveness ping — handled BEFORE the user_id check (heartbeats
+    # carry no user_id by design) and never relayed to anyone: the only
+    # effect is updating the "worker last seen" tracker that /status
+    # reports from. It must never reach a user as a "result".
+    if message_type == MessageType.HEARTBEAT.value:
+
+        worker_last_seen["worker"] = time.time()
+
+        return
 
     if not user_id:
         return

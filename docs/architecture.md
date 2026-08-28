@@ -35,6 +35,7 @@ They run as separate OS processes and communicate **only** by posting messages i
 | `error`            | worker → bot     | Something failed; relayed as plain text to the user |
 | `folder`           | worker → bot     | An archive folder was entered; relayed as text, and its resulting message_id is tracked for the TOC |
 | `done`             | worker → bot     | Every output for this job has been uploaded; triggers the "✅ all done" notice and (if any folders were tracked and the destination isn't the user's own chat) the linked Table of Contents |
+| `heartbeat`        | worker → bot     | Liveness ping (every `HEARTBEAT_INTERVAL_SECONDS`, default 5 min). Carries **no** `user_id` by design — the bot only stamps it into `state.py`'s `worker_last_seen` tracker, which the admin-only `/status` command reports from. It is never relayed to a user |
 
 **Why `job`'s file and its JSON metadata are two separate bridge messages:** `bot.py` forwards the original file into the bridge group (getting back a `message_id`), then separately posts the JSON job description referencing that `message_id`. `worker.py`'s Telethon event handler only reacts to text messages (`event.message.message`), then fetches the *actual* file message by `message_id` via `client.get_messages(...)`. Don't try to read `event.message.media` directly — that event fired for the JSON text message, which has no media.
 

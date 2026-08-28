@@ -45,6 +45,12 @@ pending_passwords: dict[int, str] = {}
 # build a linked Table Of Contents once an archive job finishes.
 job_folder_links: dict[str, list[tuple[str, int]]] = {}
 
+# "worker" -> time.time() of the last heartbeat received through the
+# bridge group (see handlers/bridge.py). Used by the admin /status
+# command to notice a crashed worker without SSHing in. Kept as a dict
+# per state.py's mutate-in-place rule.
+worker_last_seen: dict[str, float] = {}
+
 # user_id -> list of monotonic-ish (time.time) submission timestamps, used
 # by utils/rate_limit.py to enforce the per-user file-submission cap.
 # Lists are pruned in place; entries older than the window are dropped on

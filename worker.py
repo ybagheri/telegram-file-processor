@@ -5,7 +5,7 @@ import shutil
 from telethon import events
 from telethon.errors import FloodWaitError
 
-from config import Paths, Processing, Telegram
+from config import Heartbeat, Paths, Processing, Telegram
 from core.constants import MessageType
 from core.delivery import upload_entry
 from core.job import Job
@@ -417,6 +417,23 @@ async def _deliver_and_cleanup(job, success: bool, error_message: str):
     job.cleanup()
 
 
+async def heartbeat_loop():
+    """Periodically sends a small HEARTBEAT message through the bridge
+    group so bot.py can track "worker last seen" (its /status command
+    reports staleness — an operator can notice a crashed worker without
+    SSHing in). Failures are logged and retried on the next tick; a
+    missed heartbeat must never take the worker down."""
+
+    while True:
+
+        try:
+            await telegram_service.send_info(Protocol.create_heartbeat())
+        except Exception:
+            logger.exception("Failed to send bridge heartbeat")
+
+        await asyncio.sleep(Heartbeat.INTERVAL_SECONDS)
+
+
 async def _process_job_safe(payload: dict):
     try:
         await process_job(payload)
@@ -429,6 +446,8 @@ async def main():
     await telegram_service.start()
 
     logger.info("Worker started")
+
+    asyncio.create_task(heartbeat_loop())
 
     @telegram_service.client.on(events.NewMessage(chats=Telegram.GROUP_ID))
     async def bridge_handler(event):

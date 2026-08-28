@@ -13,9 +13,13 @@ by aiogram filters here, it's dispatched manually based on `state.py`'s
 `awaiting_state` dict), just a plain function this module exposes.
 """
 from aiogram import F, Router
+
+import time
+
 from aiogram.filters import Command
 from aiogram.types import CallbackQuery, InlineKeyboardButton, InlineKeyboardMarkup, Message
 
+from config import Heartbeat
 from keyboards.admin import admin_panel_keyboard, duration_keyboard, confirm_keyboard
 from core.logger import get_logger
 from services.access_store import access_store
@@ -29,7 +33,7 @@ from utils.access_control import (
     _extract_target_from_message,
     _user_display,
 )
-from state import awaiting_state, admin_flow
+from state import awaiting_state, admin_flow, worker_last_seen
 
 router = Router(name="admin")
 logger = get_logger(__name__)
@@ -49,6 +53,54 @@ async def admin_command(message: Message):
     await message.answer(
         "⚙️ پنل مدیریت کاربران:",
         reply_markup=admin_panel_keyboard(),
+    )
+
+
+def format_worker_status(
+    last_seen: float | None,
+    now: float,
+    interval_seconds: int,
+) -> str:
+    """Persian one-liner for the admin /status command, built from the
+    "worker last seen" tracker. Kept pure (timestamps in, string out) so
+    the staleness thresholds are testable without any Telegram objects."""
+
+    if last_seen is None:
+        return (
+            "🖥 وضعیت Worker:\n"
+            "❌ Worker تاکنون هیچ سیگنالی نفرستاده است — احتمالاً از کار افتاده."
+        )
+
+    delta = now - last_seen
+
+    if delta <= interval_seconds + 60:
+        return (
+            "🖥 وضعیت Worker:\n"
+            f"✅ Worker فعال است (آخرین سیگنال: {int(delta)} ثانیه پیش)."
+        )
+
+    minutes = int(delta // 60)
+
+    return (
+        "🖥 وضعیت Worker:\n"
+        f"⚠️ آخرین سیگنال Worker {minutes} دقیقه پیش بود "
+        f"(هر {interval_seconds} ثانیه یک سیگنال ارسال می‌شود). "
+        "ممکن است Worker از کار افتاده باشد."
+    )
+
+
+@router.message(Command("status"), F.chat.type == "private")
+async def status_command(message: Message):
+    if not is_admin(message.from_user.id):
+        await message.answer(not_authorized_text())
+        return
+
+    await message.answer(
+        format_worker_status(
+            worker_last_seen.get("worker"),
+            time.time(),
+            Heartbeat.INTERVAL_SECONDS,
+        )
     )
 
 
