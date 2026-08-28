@@ -22,6 +22,8 @@ import asyncio
 
 from aiogram import Dispatcher as AiogramDispatcher
 
+from aiogram.types import BotCommandScopeChat, BotCommandScopeDefault
+
 from core.logger import get_logger
 from services.access_store import access_store
 from services.settings_store import settings_store
@@ -120,6 +122,10 @@ from services.expiry_reminder import (
     check_and_send_expiry_reminders,
     expiry_reminder_loop,
 )
+from utils.bot_commands import (
+    admin_chat_commands,
+    public_commands,
+)
 
 logger = get_logger(__name__)
 
@@ -137,9 +143,48 @@ dp.include_router(core_router)
 dp.include_router(catchall_router)
 
 
+async def register_command_menus(bot) -> None:
+    """Registers the "/" command menus via setMyCommands: the public set
+    for everyone (BotCommandScopeDefault), and the admin set + public
+    set per configured admin chat (BotCommandScopeChat), so regular
+    users never see admin commands in their menu. Deliberately
+    best-effort: a Telegram hiccup here must not keep the bot from
+    starting (polling works fine without a registered menu)."""
+
+    try:
+        await bot.set_my_commands(
+            public_commands(),
+            scope=BotCommandScopeDefault(),
+        )
+        logger.info("Registered public command menu")
+    except Exception:
+        logger.exception("Failed to register the public command menu")
+
+    for admin_id in Telegram.ADMIN_IDS:
+
+        try:
+            await bot.set_my_commands(
+                admin_chat_commands(),
+                scope=BotCommandScopeChat(
+                    chat_id=admin_id,
+                ),
+            )
+            logger.info("Registered admin command menu for %s", admin_id)
+        except Exception:
+            logger.exception(
+                "Failed to register the admin command menu for %s",
+                admin_id,
+            )
+
+
 async def main():
     logger.info("Bot started")
     asyncio.create_task(expiry_reminder_loop())
+
+    # Native "/" command menu — done BEFORE polling starts so the menus
+    # are correct from the very first interaction.
+    await register_command_menus(bot)
+
     await dp.start_polling(bot)
 
 

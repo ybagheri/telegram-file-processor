@@ -108,6 +108,20 @@ Instead of uploading a file, you can paste a **direct download link** (a message
 - `MAX_FILE_SIZE` is enforced via the response's `Content-Length` header **and** as a hard cap while streaming (a missing or lying header can't overflow the disk), and the free-disk-space guard applies as usual.
 - Per-user rate limiting counts a link exactly like an uploaded file.
 
+### Commands
+
+Registered automatically into Telegram's native "/" menu on bot startup (`setMyCommands`) — regular users see only the public commands; each admin additionally sees the admin commands in their own chat. **This table is required maintenance: any change that adds or modifies a command must update it (and `utils/bot_commands.py`, which feeds the actual menu) in the same change.**
+
+| Command  | Who can use it | What it does |
+|----------|----------------|--------------|
+| `/start`    | Everyone | Welcome message; also registers unregistered users as "pending" for the admin |
+| `/settings` | Everyone | Per-user defaults: quality, watermark, upload target, caption, sort order, filename cleanup, … |
+| `/cancel`   | Everyone | Cancels whatever in-progress input flow (settings prompt, admin flow, file option prompt) you're in |
+| `/admin`    | Admins only | Opens the user-management panel (add/renew/disable/delete authorized users, list, broadcast, stats) |
+| `/status`   | Admins only | Reports whether the worker has sent a heartbeat recently — detects a crashed worker without SSHing in |
+
+(URL upload needs no command — just paste a direct link, see the section above.)
+
 Files larger than `MAX_FILE_SIZE` (default 5 GiB) are rejected immediately — before anything is downloaded — and you'll get a clear Persian error instead. For large files (over `DISK_SPACE_CHECK_THRESHOLD`, default 256 MiB) the worker also verifies the server actually has enough free disk space (declared size × `DISK_SPACE_SAFETY_FACTOR`) before downloading; if it doesn't, you'll get a "not enough disk space" error rather than a mid-processing failure.
 
 To keep the server responsive, each user can submit at most `RATE_LIMIT_MAX_FILES` (default 5) new files per `RATE_LIMIT_WINDOW_MINUTES` (default 10) — after that you'll get a "please wait" message until the window frees up. Archive-password replies and in-progress option screens are never blocked by this.
