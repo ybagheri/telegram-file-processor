@@ -1,0 +1,35 @@
+# Systemd unit for bot.py (aiogram, Bot API side).
+#
+# Install (as root, adjust paths/user to your deployment):
+#   cp deploy/telegram-bot.service /etc/systemd/system/
+#   systemctl daemon-reload
+#   systemctl enable --now telegram-bot
+#
+# Logs: journalctl -u telegram-bot -f
+# (core/logger.py additionally writes logs/bot.log in the project dir.)
+
+[Unit]
+Description=Telegram File Processor - bot (aiogram, Bot API)
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+# Adjust to the user that owns the project checkout and its
+# downloads/outputs/sessions directories.
+User=deploy
+WorkingDirectory=/opt/telegram-file-processor
+ExecStart=/usr/bin/python3 /opt/telegram-file-processor/bot.py
+Restart=on-failure
+RestartSec=5
+# config.py loads the project-local .env itself (python-dotenv), so no
+# EnvironmentFile is strictly needed. If you'd rather keep secrets in
+# systemd, uncomment and create the file instead:
+#EnvironmentFile=/opt/telegram-file-processor/.env
+
+# Hardening (optional, remove if it breaks a local integration).
+NoNewPrivileges=true
+PrivateTmp=true
+
+[Install]
+WantedBy=multi-user.target

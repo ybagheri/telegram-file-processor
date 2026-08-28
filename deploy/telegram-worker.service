@@ -1,0 +1,39 @@
+# Systemd unit for worker.py (Telethon, user account - does the actual
+# file processing). Deliberately a separate unit from telegram-bot: the
+# two processes only talk through the Telegram bridge group, so either
+# can restart independently without the other needing to know.
+#
+# Install (as root, adjust paths/user to your deployment):
+#   cp deploy/telegram-worker.service /etc/systemd/system/
+#   systemctl daemon-reload
+#   systemctl enable --now telegram-worker
+#
+# Logs: journalctl -u telegram-worker -f
+# (core/logger.py additionally writes logs/worker.log in the project dir.)
+
+[Unit]
+Description=Telegram File Processor - worker (Telethon, user account)
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+# Adjust to the user that owns the project checkout and its
+# downloads/outputs/sessions directories (must be the SAME user/path as
+# telegram-bot.service if both run on one machine).
+User=deploy
+WorkingDirectory=/opt/telegram-file-processor
+ExecStart=/usr/bin/python3 /opt/telegram-file-processor/worker.py
+Restart=on-failure
+RestartSec=5
+# config.py loads the project-local .env itself (python-dotenv), so no
+# EnvironmentFile is strictly needed:
+#EnvironmentFile=/opt/telegram-file-processor/.env
+
+# The Telethon session file (sessions/*.session) must persist across
+# restarts or the worker will re-login every time - do NOT use
+# PrivateTmp-style sandboxing that hides the project dir.
+NoNewPrivileges=true
+
+[Install]
+WantedBy=multi-user.target

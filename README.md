@@ -53,6 +53,20 @@ cp .env.example .env    # fill in the values below
 pip install -r requirements.txt
 ```
 
+### Running long-term (recommended): systemd
+
+The bot and the worker are two independent processes — on a VPS, run both under systemd so they survive terminal closure and restart on crash (`Restart=on-failure`). Example units are provided in [`deploy/`](deploy/):
+
+```bash
+sudo cp deploy/telegram-bot.service deploy/telegram-worker.service /etc/systemd/system/
+# then edit both files: set User= and WorkingDirectory= to your deployment's
+# user and project path (e.g. /opt/telegram-file-processor)
+sudo systemctl daemon-reload
+sudo systemctl enable --now telegram-bot telegram-worker
+```
+
+Check status/logs with `systemctl status telegram-bot` / `journalctl -u telegram-worker -f` (each process also writes its own `logs/bot.log` / `logs/worker.log` in the project directory). Both processes talk to each other only through the Telegram bridge group, so either can restart independently — there is no ordering requirement between the two units. For a quick manual test you can still run `python bot.py` and `python worker.py` in two terminals, but that's not the recommended way to run them long-term.
+
 | Variable       | Description                                             |
 |----------------|-----------------------------------------------------------|
 | `API_ID`       | From my.telegram.org, for the Telethon user account      |
