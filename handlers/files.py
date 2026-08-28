@@ -184,7 +184,21 @@ async def target_pick(callback: CallbackQuery):
 
 async def finalize_job(callback: CallbackQuery, pending: PendingFile, pid: str):
 
-    if pending.is_multipart:
+    if pending.url:
+
+        # URL-upload mode: there is no Telegram media to forward into the
+        # bridge — the worker streams the bytes from the URL itself.
+        job_data = {
+            "type": MessageType.JOB.value,
+            "user_id": pending.user_id,
+            "url": pending.url,
+            "file_type": pending.file_type,
+            "file_name": pending.file_name,
+            "original_chat_id": pending.chat_id,
+            "options": pending.options,
+        }
+
+    elif pending.is_multipart:
 
         job_data = {
             "type": MessageType.JOB.value,

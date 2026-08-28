@@ -38,6 +38,15 @@ from state import admin_flow, awaiting_state, pending_files, pending_passwords, 
 from utils.access_control import is_authorized, not_authorized_text, track_pending_user_if_needed
 from utils.filetype import FileTypeDetector
 from utils.rate_limit import is_rate_limited, record_submission
+from utils.url_validation import (
+    REASON_BAD_SCHEME,
+    REASON_NO_HOST,
+    REASON_PRIVATE_ADDRESS,
+    REASON_UNRESOLVABLE,
+    extract_url,
+    filename_from_url,
+    validate_url,
+)
 
 router = Router(name="core")
 catchall_router = Router(name="catchall")
@@ -80,6 +89,112 @@ def check_submission_rate_limit(user_id: int, message: Message) -> bool:
         user_submission_times.pop(user_id, None)
 
     return True
+
+
+def _url_error_text(reason: str) -> str:
+    """Persian feedback for a rejected URL submission."""
+
+    if reason == REASON_BAD_SCHEME:
+        return "❌ فقط لینک‌های http و https پشتیبانی می‌شوند."
+
+    if reason == REASON_PRIVATE_ADDRESS:
+        return (
+            "❌ به دلایل امنیتی، دانلود از آدرس‌های داخلی یا شبکه‌ی خصوصی "
+            "مجاز نیست."
+        )
+
+    if reason == REASON_UNRESOLVABLE:
+        return "❌ دامنه‌ی لینک پیدا نشد. لینک را بررسی کنید."
+
+    return "❌ لینک معتبر نیست. یک لینک مستقیم فایل بفرستید."
+
+
+def _pending_options_from_defaults(defaults: dict) -> dict:
+    """The per-file options dict seeded from the user's /settings
+    defaults — shared by the upload path and the URL-upload path so both
+    create identical PendingFile options."""
+
+    return {
+        "quality": defaults["quality"],
+        "watermark": defaults["watermark"],
+        "upload_as": defaults["upload_as"],
+        "target_chat_id": defaults["target_chat_id"],
+        "target_label": defaults["target_label"],
+        "artist": defaults["artist"],
+        "logo_path": defaults["logo_path"],
+        "logo_position": defaults["logo_position"],
+        "title": "",
+        "rename_to": "",
+        "custom_thumbnail": "",
+        "sort_mode": defaults["sort_mode"],
+        "sort_order": defaults["sort_order"],
+        "exclude_text": defaults["exclude_text"],
+        "thumb_count": 0,
+        "thumb_columns": 0,
+        "make_collage": False,
+    }
+
+
+async def handle_url_submission(message: Message, url: str) -> None:
+    """The URL-upload entry point: a private, authorized user sent a
+    message that is just an http(s) link. Validated here (scheme + SSRF
+    guard + rate limit + supported type), then registered in
+    pending_files exactly like an uploaded file — the rest of the flow
+    (quality/options/target/confirm) and the worker pipeline are shared
+    unchanged; only "where the bytes come from" differs."""
+
+    user_id = message.from_user.id
+
+    ok, reason = validate_url(url)
+
+    if not ok:
+        await message.answer(_url_error_text(reason))
+        return
+
+    # Same cap as direct uploads — a URL isn't a way around rate limiting.
+    if not check_submission_rate_limit(user_id, message):
+        await message.answer(
+            _rate_limit_text(
+                RateLimiting.MAX_FILES,
+                RateLimiting.WINDOW_MINUTES,
+            )
+        )
+        return
+
+    filename = filename_from_url(url)
+
+    file_type = FileTypeDetector.detect("", filename)
+
+    if file_type == "UNKNOWN":
+        await message.answer(
+            "❌ نوع فایل از روی لینک قابل تشخیص نیست یا پشتیبانی نمی‌شود."
+        )
+        return
+
+    defaults = settings_store.get(user_id)
+
+    pid = uuid4().hex[:10]
+
+    pending_files[pid] = PendingFile(
+        user_id=user_id,
+        chat_id=message.chat.id,
+        file_name=filename,
+        file_type=file_type,
+        source_message=message,
+        url=url,
+        options=_pending_options_from_defaults(defaults),
+    )
+
+    if file_type == "VIDEO":
+        await message.answer(
+            "🔻 کیفیت / فرمت خروجی را انتخاب کنید 🔻",
+            reply_markup=quality_keyboard(pid),
+        )
+    else:
+        await message.answer(
+            "تنظیمات این فایل را بررسی و در صورت نیاز تغییر دهید:",
+            reply_markup=options_keyboard(pid, pending_files),
+        )
 
 
 async def handle_awaited_input(message: Message, state: str) -> bool:
@@ -206,6 +321,14 @@ async def handle_private_message(message: Message):
             await handle_incoming_photo(message)
             return
 
+        # URL-upload mode: a text message that is just an http(s) link.
+        # Checked AFTER awaited-input/password handling above, so it can
+        # never hijack those free-text flows.
+        url = extract_url(message.text or "")
+
+        if url:
+            await handle_url_submission(message, url)
+
         return
 
     # Per-user rate limiting: reject (with a friendly Persian message)
@@ -240,25 +363,7 @@ async def handle_private_message(message: Message):
         file_name=file_name,
         file_type=file_type,
         source_message=message,
-        options={
-            "quality": defaults["quality"],
-            "watermark": defaults["watermark"],
-            "upload_as": defaults["upload_as"],
-            "target_chat_id": defaults["target_chat_id"],
-            "target_label": defaults["target_label"],
-            "artist": defaults["artist"],
-            "logo_path": defaults["logo_path"],
-            "logo_position": defaults["logo_position"],
-            "title": "",
-            "rename_to": "",
-            "custom_thumbnail": "",
-            "sort_mode": defaults["sort_mode"],
-            "sort_order": defaults["sort_order"],
-            "exclude_text": defaults["exclude_text"],
-            "thumb_count": 0,
-            "thumb_columns": 0,
-            "make_collage": False,
-        },
+        options=_pending_options_from_defaults(defaults),
     )
 
     if file_type == "VIDEO":

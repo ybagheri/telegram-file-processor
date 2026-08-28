@@ -15,9 +15,19 @@ from core.password_broker import password_broker
 from core.protocol import Protocol
 from dispatcher.dispatcher import Dispatcher
 from processors.archive import ArchiveProcessor
+from services.media import media_service
 from services.telegram import telegram_service
+from services.url_downloader import (
+    REASON_EMPTY,
+    REASON_NETWORK,
+    REASON_TIMEOUT,
+    REASON_TOO_LARGE,
+    URLDownloadError,
+    download_to_disk,
+)
 from utils.filetype import FileTypeDetector
 from utils.text import strip_excluded
+from utils.url_validation import filename_from_url
 
 logger = get_logger(__name__)
 
@@ -189,6 +199,16 @@ async def process_job(payload: dict):
 
     message_id = payload.get("message_id")
 
+    # URL-upload mode: the payload carries a direct http(s) link instead
+    # of a bridge message_id pointing at forwarded media — the bytes get
+    # onto disk by streaming the URL, then everything downstream
+    # (guards, dispatch, delivery) runs exactly as for an upload.
+    url = payload.get("url")
+
+    if url:
+        await process_url_job(payload, url)
+        return
+
     # The bridge message that carries the JSON payload is a *separate*
     # text message from the one that carries the actual file (which was
     # forwarded/copied into the group by bot.py). We fetch the real
@@ -272,6 +292,102 @@ async def process_job(payload: dict):
             success = await dispatcher.dispatch(job)
     except Exception as e:
         logger.exception("Unhandled error while dispatching job %s", job.job_id)
+        success = False
+        error_message = (str(e) or "Processing failed")[:300]
+
+    await _deliver_and_cleanup(job, success, error_message)
+
+
+def _url_download_error_text(reason: str, detail: str = "") -> str:
+    """Persian feedback for a failed URL download, mapped from the
+    REASON_* tokens of services/url_downloader.py."""
+
+    if reason == REASON_TOO_LARGE:
+        return _file_too_large_message(int(detail)) if detail.isdigit() else (
+            "حجم فایل در لینک بیشتر از حد مجاز است."
+        )
+
+    if reason == REASON_TIMEOUT:
+        return "❌ دانلود فایل بیش از حد طول کشید و متوقف شد. لطفاً دوباره تلاش کنید."
+
+    if reason == REASON_EMPTY:
+        return "❌ فایل دریافتی از لینک خالی بود."
+
+    return "❌ دانلود فایل از لینک ناموفق بود. لطفاً لینک را بررسی کنید."
+
+
+async def process_url_job(payload: dict, url: str):
+    """URL-upload jobs: stream the file from the URL to disk on this
+    server (respecting MAX_FILE_SIZE via Content-Length AND a hard cap
+    while streaming, plus the free-disk-space guard), then feed it into
+    the exact same dispatch/delivery pipeline as an uploaded file — no
+    parallel pipeline, the only new piece is "bytes from a URL" instead
+    of "bytes from a Telegram message"."""
+
+    job = Job(
+        user_id=payload["user_id"],
+        message_id=0,  # no bridge media message exists for URL jobs
+        options=_build_options(payload.get("options", {})),
+    )
+
+    filename = payload.get("file_name") or filename_from_url(url)
+
+    job.original_name = strip_excluded(filename, job.options.exclude_text)
+
+    job.file_type = payload.get("file_type") or FileTypeDetector.detect(
+        "",
+        filename,
+    )
+
+    input_path = job.input_dir / filename
+
+    try:
+        job.input_file = await download_to_disk(
+            url,
+            input_path,
+            Processing.MAX_FILE_SIZE,
+        )
+    except URLDownloadError as e:
+
+        logger.warning(
+            "URL download failed for job %s: %s (%s)",
+            job.job_id,
+            e.reason,
+            e.detail,
+        )
+
+        await telegram_service.send_error(
+            Protocol.create_error(
+                user_id=job.user_id,
+                job_id=job.job_id,
+                message=_url_download_error_text(e.reason, e.detail),
+            )
+        )
+
+        job.cleanup()
+        return
+
+    job.file_size = media_service.size(job.input_file)
+
+    # Same guards as uploaded files, now sized from the actual bytes on
+    # disk (belt-and-braces on top of the downloader's caps).
+    if job.file_size > Processing.MAX_FILE_SIZE:
+        await _reject_too_large(job, job.file_size)
+        return
+
+    if not _has_enough_disk_space(job.file_size):
+        await _reject_no_disk_space(job, job.file_size)
+        return
+
+    success = False
+    error_message = "Processing failed"
+
+    try:
+        # Same processing semaphore as every other job.
+        async with _get_processing_semaphore():
+            success = await dispatcher.dispatch(job)
+    except Exception as e:
+        logger.exception("Unhandled error while dispatching URL job %s", job.job_id)
         success = False
         error_message = (str(e) or "Processing failed")[:300]
 

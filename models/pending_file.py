@@ -22,3 +22,7 @@ class PendingFile:
     is_multipart: bool = False
     parts_total: int = 0
     part_message_ids: list = field(default_factory=list)
+    # URL-upload mode: when set, there is no Telegram media to forward —
+    # finalize_job puts the URL in the job payload and worker.py streams
+    # the file from it directly to disk.
+    url: str = ""

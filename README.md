@@ -99,6 +99,15 @@ Send a file to the bot in a private chat. For video, you'll get an inline-keyboa
 
 **Admins** additionally have `/admin` (the user-management panel) and `/status` — a liveness check on the worker process, driven by the heartbeat the worker sends through the bridge every `HEARTBEAT_INTERVAL_SECONDS`. `/status` says whether the worker has been seen recently, so a crashed worker is noticeable without SSHing into the server.
 
+### Sending a direct file link (URL upload)
+
+Instead of uploading a file, you can paste a **direct download link** (a message that is just an `http://` or `https://` URL ending in a supported file type, e.g. `https://example.com/course.part1.rar`). The bot validates the link, then offers the exact same quality/options/target flow as an uploaded file; the server streams the file from the link to disk and processes it identically. Constraints:
+
+- `http`/`https` links only; links pointing at local/private network addresses (127.0.0.1, 10.x, 192.168.x, 169.254.x, …) are rejected for security (SSRF protection).
+- The link's filename extension decides the file type — links without a recognizable type are rejected before anything is downloaded.
+- `MAX_FILE_SIZE` is enforced via the response's `Content-Length` header **and** as a hard cap while streaming (a missing or lying header can't overflow the disk), and the free-disk-space guard applies as usual.
+- Per-user rate limiting counts a link exactly like an uploaded file.
+
 Files larger than `MAX_FILE_SIZE` (default 5 GiB) are rejected immediately — before anything is downloaded — and you'll get a clear Persian error instead. For large files (over `DISK_SPACE_CHECK_THRESHOLD`, default 256 MiB) the worker also verifies the server actually has enough free disk space (declared size × `DISK_SPACE_SAFETY_FACTOR`) before downloading; if it doesn't, you'll get a "not enough disk space" error rather than a mid-processing failure.
 
 To keep the server responsive, each user can submit at most `RATE_LIMIT_MAX_FILES` (default 5) new files per `RATE_LIMIT_WINDOW_MINUTES` (default 10) — after that you'll get a "please wait" message until the window frees up. Archive-password replies and in-progress option screens are never blocked by this.
