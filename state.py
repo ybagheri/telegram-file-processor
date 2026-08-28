@@ -44,3 +44,9 @@ pending_passwords: dict[int, str] = {}
 # job_id -> [(folder_name, message_id_in_destination_chat), ...], used to
 # build a linked Table Of Contents once an archive job finishes.
 job_folder_links: dict[str, list[tuple[str, int]]] = {}
+
+# user_id -> list of monotonic-ish (time.time) submission timestamps, used
+# by utils/rate_limit.py to enforce the per-user file-submission cap.
+# Lists are pruned in place; entries older than the window are dropped on
+# every check.
+user_submission_times: dict[int, list[float]] = {}

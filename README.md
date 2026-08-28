@@ -66,6 +66,8 @@ pip install -r requirements.txt
 | `DISK_SPACE_CHECK_THRESHOLD` | *(optional)* Only run the free-disk-space guard for files whose declared size exceeds this, in bytes (default: 256 MiB). Smaller files skip the check entirely |
 | `DISK_SPACE_SAFETY_FACTOR` | *(optional)* How many bytes of free space must be available per declared input byte before a large file may be downloaded (default: `2.0`) — ffmpeg re-encoding and archive extraction need working space beyond the raw input. Checked against `shutil.disk_usage` on the `downloads/`, `temp/` and `outputs/` paths |
 | `MAX_CONCURRENT_JOBS` | *(optional)* How many jobs may run the heavy processing step (ffmpeg re-encode / archive extraction) at the same time (default: `2`). Additional jobs queue and are processed in arrival order; downloads are not counted against this limit |
+| `RATE_LIMIT_MAX_FILES` | *(optional)* Per-user submission cap: at most this many new files per `RATE_LIMIT_WINDOW_MINUTES` (default: `5`). Set to `0` to disable rate limiting entirely. Over-the-cap submissions get a friendly Persian "wait a bit" message instead of being processed |
+| `RATE_LIMIT_WINDOW_MINUTES` | *(optional)* Sliding-window size (in minutes) for the per-user submission cap (default: `10`) |
 
 When `ADMIN_IDS` is set, an admin gets `/admin` — a panel to add a user (choosing how long their access lasts: 1 week / 3 months / 6 months / 1 year / unlimited), renew/change someone's expiry later, or enable/disable a user without losing their record. Users can be identified either by forwarding one of their messages or by typing their numeric id directly (in which case the admin can optionally attach a name/username by hand). This data lives in a small SQLite database (`config_data/access.db`), not a plain file.
 
@@ -81,6 +83,8 @@ python worker.py
 Send a file to the bot in a private chat. For video, you'll get an inline-keyboard prompt for quality/format (144p–720p, MP3, M4A, voice note); every file type then gets a review screen (rename, thumbnail, watermark, caption, delivery target) before you confirm. Use `/settings` any time to change your defaults.
 
 Files larger than `MAX_FILE_SIZE` (default 5 GiB) are rejected immediately — before anything is downloaded — and you'll get a clear Persian error instead. For large files (over `DISK_SPACE_CHECK_THRESHOLD`, default 256 MiB) the worker also verifies the server actually has enough free disk space (declared size × `DISK_SPACE_SAFETY_FACTOR`) before downloading; if it doesn't, you'll get a "not enough disk space" error rather than a mid-processing failure.
+
+To keep the server responsive, each user can submit at most `RATE_LIMIT_MAX_FILES` (default 5) new files per `RATE_LIMIT_WINDOW_MINUTES` (default 10) — after that you'll get a "please wait" message until the window frees up. Archive-password replies and in-progress option screens are never blocked by this.
 
 ## Project structure
 

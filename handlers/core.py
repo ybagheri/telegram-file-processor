@@ -18,10 +18,13 @@ every time, regardless of when `dp.include_router(...)` was called.
 """
 from uuid import uuid4
 
+import time
+
 from aiogram import F, Router
 from aiogram.filters import Command
 from aiogram.types import Message
 
+from config import RateLimiting
 from core.protocol import Protocol
 from handlers.admin import handle_admin_awaited_input
 from handlers.files import handle_file_awaited_input
@@ -31,12 +34,52 @@ from keyboards.files import options_keyboard, quality_keyboard
 from models.pending_file import PendingFile
 from services.settings_store import settings_store
 from services.telegram import telegram_service
-from state import admin_flow, awaiting_state, pending_files, pending_passwords
+from state import admin_flow, awaiting_state, pending_files, pending_passwords, user_submission_times
 from utils.access_control import is_authorized, not_authorized_text, track_pending_user_if_needed
 from utils.filetype import FileTypeDetector
+from utils.rate_limit import is_rate_limited, record_submission
 
 router = Router(name="core")
 catchall_router = Router(name="catchall")
+
+
+def _rate_limit_text(max_files: int, window_minutes: int) -> str:
+    """Persian rejection message for a rate-limited submission."""
+
+    return (
+        f"⛔ شما در {window_minutes} دقیقه گذشته بیش از حد مجاز "
+        f"({max_files} فایل) ارسال کرده‌اید. لطفاً کمی صبر کنید و "
+        "دوباره تلاش کنید."
+    )
+
+
+def check_submission_rate_limit(user_id: int, message: Message) -> bool:
+    """Returns True when the submission is ALLOWED (and records it);
+    False when the user is over the cap (caller sends the Persian
+    rejection message). Sits alongside is_authorized(...) — it never
+    replaces the access check, which must run first."""
+
+    history = user_submission_times.setdefault(user_id, [])
+
+    now = time.time()
+    window_seconds = RateLimiting.WINDOW_MINUTES * 60
+
+    if is_rate_limited(
+        history,
+        now,
+        RateLimiting.MAX_FILES,
+        window_seconds,
+    ):
+        return False
+
+    record_submission(history, now)
+
+    # Keep the dict from growing without bound: a user with no timestamps
+    # left after pruning doesn't need an entry.
+    if not history:
+        user_submission_times.pop(user_id, None)
+
+    return True
 
 
 async def handle_awaited_input(message: Message, state: str) -> bool:
@@ -163,6 +206,19 @@ async def handle_private_message(message: Message):
             await handle_incoming_photo(message)
             return
 
+        return
+
+    # Per-user rate limiting: reject (with a friendly Persian message)
+    # when this user has already submitted their cap of files within the
+    # configured window. Applied only to actual new submissions —
+    # password replies and awaited-input flows above are never blocked.
+    if not check_submission_rate_limit(user_id, message):
+        await message.answer(
+            _rate_limit_text(
+                RateLimiting.MAX_FILES,
+                RateLimiting.WINDOW_MINUTES,
+            )
+        )
         return
 
     file_name = getattr(file, "file_name", None) or f"file_{message.message_id}"

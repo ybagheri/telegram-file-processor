@@ -295,6 +295,25 @@ class Logging:
     )
 
 
+class RateLimiting:
+
+    # Per-user submission cap: at most MAX_FILES new file submissions per
+    # WINDOW_MINUTES. MAX_FILES <= 0 disables the limiter entirely.
+    MAX_FILES = int(
+        os.getenv(
+            "RATE_LIMIT_MAX_FILES",
+            "5",
+        )
+    )
+
+    WINDOW_MINUTES = int(
+        os.getenv(
+            "RATE_LIMIT_WINDOW_MINUTES",
+            "10",
+        )
+    )
+
+
 class Config:
 
     @classmethod
