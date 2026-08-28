@@ -42,6 +42,8 @@ They run as separate OS processes and communicate **only** by posting messages i
 
 A `Job` is created fresh per bridge `job` message, holds `user_id`, `file_type`, `options` (a `JobOptions`), and computed paths (`input_dir`, `output_dir`, `extracted_dir`, `thumbs_dir` — all under `downloads/job_<id>/`). `job.cleanup()` deletes the whole directory once the job is done, success or failure.
 
+**Pre-download guards** (in `worker.py`, before `telegram_service.download(...)` runs): a job whose *declared* Telegram size exceeds `Processing.MAX_FILE_SIZE` is rejected with a `Protocol.create_error(...)` through the bridge (Persian message to the user) and `job.cleanup()` — for multi-volume jobs the sum of all parts' declared sizes is checked, so the set can't be smuggled in piece by piece.
+
 **`OutputFile`, not a flat `Path` list.** `job.output_files` is a list of `OutputFile` entries, each with its own `kind` (`"video"` / `"audio"` / `"voice"` / `"document"`), `title`, `artist`, `duration`, `width`, `height`, `thumbnail`, and `folder`. This exists because a single archive job can produce a mix of video, audio, and PDF outputs — putting that metadata on the shared `Job` object meant it got clobbered as processing moved from file to file. `worker.py`'s upload loop reads each entry's own `kind` to decide `force_document`/`voice_note`/attributes — it does not infer anything from `job.file_type` (which, for an archive, is just `"ARCHIVE"` and tells you nothing about any individual output).
 
 ## Dispatcher & processor registry

@@ -4,7 +4,7 @@ import re
 from telethon import events
 from telethon.errors import FloodWaitError
 
-from config import Telegram
+from config import Processing, Telegram
 from core.constants import MessageType
 from core.delivery import upload_entry
 from core.job import Job
@@ -47,6 +47,44 @@ def _strip_part_suffix(filename: str) -> str:
         stem_with_ext += ".rar"
 
     return stem_with_ext
+
+
+def _file_too_large_message(size_bytes: int) -> str:
+    """Persian text delivered to the user when a job is rejected for
+    exceeding Processing.MAX_FILE_SIZE — sent through the bridge as a
+    Protocol.create_error payload (handlers/bridge.py prefixes it with
+    "❌ خطا:")."""
+
+    limit_gb = Processing.MAX_FILE_SIZE / (1024 * 1024 * 1024)
+    size_gb = size_bytes / (1024 * 1024 * 1024)
+
+    return (
+        f"حجم فایل ({size_gb:.1f} گیگابایت) بیشتر از حد مجاز "
+        f"({limit_gb:.1f} گیگابایت) است."
+    )
+
+
+async def _reject_too_large(job: Job, size_bytes: int):
+    """Tells the user the job was rejected for size and aborts cleanly.
+    Must be called before any download starts, so there's nothing on
+    disk to clean up beyond the job's (empty) working directories."""
+
+    logger.warning(
+        "Job %s rejected: declared size %s bytes exceeds MAX_FILE_SIZE (%s)",
+        job.job_id,
+        size_bytes,
+        Processing.MAX_FILE_SIZE,
+    )
+
+    await telegram_service.send_error(
+        Protocol.create_error(
+            user_id=job.user_id,
+            job_id=job.job_id,
+            message=_file_too_large_message(size_bytes),
+        )
+    )
+
+    job.cleanup()
 
 
 async def process_job(payload: dict):
@@ -94,6 +132,13 @@ async def process_job(payload: dict):
         mime_type,
         filename,
     )
+
+    # MAX_FILE_SIZE enforcement: message.file.size is the declared size
+    # from Telegram metadata, known before any bytes are transferred —
+    # reject here rather than discovering the overrun mid-download.
+    if job.file_size > Processing.MAX_FILE_SIZE:
+        await _reject_too_large(job, job.file_size)
+        return
 
     input_path = job.input_dir / filename
 
@@ -156,6 +201,19 @@ async def process_multipart_job(payload: dict, part_ids: list[int]):
     first_name = (messages[0].file.name if messages[0].file else None) or "archive.rar"
     base_name = _strip_part_suffix(first_name)
     job.original_name = strip_excluded(base_name, job.options.exclude_text)
+
+    # MAX_FILE_SIZE enforcement: sum the declared size of every part and
+    # reject before any volume is downloaded (same rule as single-file
+    # jobs — a multi-volume set isn't a way around the size limit).
+    total_size = sum(
+        (m.file.size or 0)
+        for m in messages
+        if m.file
+    )
+
+    if total_size > Processing.MAX_FILE_SIZE:
+        await _reject_too_large(job, total_size)
+        return
 
     success = False
     error_message = "Processing failed"
