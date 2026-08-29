@@ -83,6 +83,9 @@ Check status/logs with `systemctl status telegram-bot` / `journalctl -u telegram
 | `RATE_LIMIT_MAX_FILES` | *(optional)* Per-user submission cap: at most this many new files per `RATE_LIMIT_WINDOW_MINUTES` (default: `5`). Set to `0` to disable rate limiting entirely. Over-the-cap submissions get a friendly Persian "wait a bit" message instead of being processed |
 | `RATE_LIMIT_WINDOW_MINUTES` | *(optional)* Sliding-window size (in minutes) for the per-user submission cap (default: `10`) |
 | `HEARTBEAT_INTERVAL_SECONDS` | *(optional)* How often (in seconds) the worker sends a liveness "heartbeat" through the bridge group (default: `300`). The admin's `/status` command reports how recent the last heartbeat was, so a crashed worker is noticeable without SSHing in |
+| `PROGRESS_ENABLED` | *(optional)* Whether the worker shows a live download/processing/upload progress message for each job (default: `true`). Set to `false` to restore the old silent behavior |
+| `PROGRESS_UPDATE_INTERVAL_SECONDS` | *(optional)* Minimum time between edits of a job's progress message, in seconds (default: `2.5`) |
+| `PROGRESS_BAR_LENGTH` | *(optional)* Number of ●/○ segments in the progress bar (default: `10`) |
 
 When `ADMIN_IDS` is set, an admin gets `/admin` — a panel to add a user (choosing how long their access lasts: 1 week / 3 months / 6 months / 1 year / unlimited), renew/change someone's expiry later, or enable/disable a user without losing their record. Users can be identified either by forwarding one of their messages or by typing their numeric id directly (in which case the admin can optionally attach a name/username by hand). This data lives in a small SQLite database (`config_data/access.db`), not a plain file.
 

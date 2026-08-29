@@ -5,6 +5,7 @@ so no ffmpeg/ffprobe binary is ever executed. Also covers the
 ffprobe-based info parsing with a mocked `subprocess.check_output`.
 """
 
+import asyncio
 import json
 
 from pathlib import Path
@@ -19,7 +20,7 @@ def captured_ffmpeg(monkeypatch):
 
     commands = []
 
-    async def fake_run(command):
+    async def fake_run(command, **kwargs):
         commands.append(command)
         return True
 
@@ -305,3 +306,207 @@ def test_get_audio_info_parses_probe_output(monkeypatch, tmp_path):
     assert info["bitrate"] == 128000
     assert info["sample_rate"] == 44100
     assert info["channels"] == 2
+
+
+# ======================================================================
+# ffmpeg live progress parsing (services/media.py's `-progress pipe:1`
+# support)
+# ======================================================================
+
+
+class _FakeProgressStream:
+    """A fake asyncio stdout stream: `_pump_ffmpeg_progress` only ever
+    calls `await stream.readline()` on it."""
+
+    def __init__(self, lines: list[bytes]):
+        self._lines = list(lines) + [b""]  # b"" == EOF, like a real stream
+
+    async def readline(self):
+        return self._lines.pop(0)
+
+
+@pytest.mark.asyncio
+async def test_pump_ffmpeg_progress_parses_out_time_ms():
+
+    stream = _FakeProgressStream(
+        [
+            b"frame=10\n",
+            b"out_time_ms=25000000\n",  # 25 seconds, in microseconds
+            b"progress=continue\n",
+        ]
+    )
+
+    calls = []
+
+    await media_service._pump_ffmpeg_progress(
+        stream,
+        lambda elapsed, total, fraction: calls.append((elapsed, total, fraction)),
+        total_duration=100.0,
+    )
+
+    assert calls == [(25.0, 100.0, 0.25)]
+
+
+@pytest.mark.asyncio
+async def test_pump_ffmpeg_progress_parses_out_time_string():
+
+    stream = _FakeProgressStream(
+        [
+            b"out_time=00:00:50.000000\n",
+            b"progress=continue\n",
+        ]
+    )
+
+    calls = []
+
+    await media_service._pump_ffmpeg_progress(
+        stream,
+        lambda elapsed, total, fraction: calls.append((elapsed, total, fraction)),
+        total_duration=100.0,
+    )
+
+    assert calls == [(50.0, 100.0, 0.5)]
+
+
+@pytest.mark.asyncio
+async def test_pump_ffmpeg_progress_end_reports_full_duration():
+
+    stream = _FakeProgressStream([b"progress=end\n"])
+
+    calls = []
+
+    await media_service._pump_ffmpeg_progress(
+        stream,
+        lambda elapsed, total, fraction: calls.append((elapsed, total, fraction)),
+        total_duration=42.0,
+    )
+
+    assert calls == [(42.0, 42.0, 1.0)]
+
+
+@pytest.mark.asyncio
+async def test_pump_ffmpeg_progress_ignores_unparseable_lines_and_keeps_going():
+
+    stream = _FakeProgressStream(
+        [
+            b"speed=1.02x\n",  # no timing info, must be skipped, not crash
+            b"out_time_ms=notanumber\n",  # malformed, must be skipped too
+            b"out_time_ms=10000000\n",
+            b"progress=continue\n",
+        ]
+    )
+
+    calls = []
+
+    await media_service._pump_ffmpeg_progress(
+        stream,
+        lambda elapsed, total, fraction: calls.append((elapsed, total, fraction)),
+        total_duration=50.0,
+    )
+
+    assert calls == [(10.0, 50.0, 0.2)]
+
+
+@pytest.mark.asyncio
+async def test_pump_ffmpeg_progress_swallows_a_broken_callback():
+
+    stream = _FakeProgressStream([b"out_time_ms=5000000\n"])
+
+    def _boom(elapsed, total, fraction):
+        raise RuntimeError("boom")
+
+    # Must return normally rather than propagating the callback's error.
+    await media_service._pump_ffmpeg_progress(stream, _boom, total_duration=10.0)
+
+
+class _FakeProcess:
+
+    def __init__(self, stdout_lines: list[bytes], stderr: bytes = b"", returncode: int = 0):
+        self.stdout = _FakeProgressStream(stdout_lines)
+        self._stderr = stderr
+        self.returncode = returncode
+
+    class _StderrReader:
+        def __init__(self, data):
+            self._data = data
+
+        async def read(self):
+            return self._data
+
+    @property
+    def stderr(self):
+        return self._StderrReader(self._stderr)
+
+    async def wait(self):
+        return self.returncode
+
+    async def communicate(self):
+        return b"", self._stderr
+
+
+@pytest.mark.asyncio
+async def test_run_adds_progress_flags_only_when_tracking(monkeypatch):
+
+    captured = {}
+
+    async def fake_create_subprocess_exec(*command, stdout=None, stderr=None):
+        captured["command"] = command
+        captured["stdout"] = stdout
+        return _FakeProcess([b"out_time_ms=1000000\n"])
+
+    monkeypatch.setattr(
+        "services.media.asyncio.create_subprocess_exec",
+        fake_create_subprocess_exec,
+    )
+
+    calls = []
+
+    ok = await media_service._run(
+        ["ffmpeg", "-i", "in.mp4", "out.mp4"],
+        progress_callback=lambda *a: calls.append(a),
+        total_duration=10.0,
+    )
+
+    assert ok is True
+    assert captured["command"][:3] == ("ffmpeg", "-progress", "pipe:1")
+    assert calls == [(1.0, 10.0, 0.1)]
+
+
+@pytest.mark.asyncio
+async def test_run_without_progress_callback_is_unchanged(monkeypatch):
+    """No progress_callback/total_duration -> the exact same command list
+    and single-communicate() behaviour as before this feature existed."""
+
+    captured = {}
+
+    async def fake_create_subprocess_exec(*command, stdout=None, stderr=None):
+        captured["command"] = command
+        captured["stdout"] = stdout
+        return _FakeProcess([], stderr=b"")
+
+    monkeypatch.setattr(
+        "services.media.asyncio.create_subprocess_exec",
+        fake_create_subprocess_exec,
+    )
+
+    ok = await media_service._run(["ffmpeg", "-i", "in.mp4", "out.mp4"])
+
+    assert ok is True
+    assert captured["command"] == ("ffmpeg", "-i", "in.mp4", "out.mp4")
+    assert captured["stdout"] == asyncio.subprocess.DEVNULL
+
+
+@pytest.mark.asyncio
+async def test_run_reports_failure_on_nonzero_returncode(monkeypatch):
+
+    async def fake_create_subprocess_exec(*command, stdout=None, stderr=None):
+        return _FakeProcess([], stderr=b"ffmpeg blew up", returncode=1)
+
+    monkeypatch.setattr(
+        "services.media.asyncio.create_subprocess_exec",
+        fake_create_subprocess_exec,
+    )
+
+    ok = await media_service._run(["ffmpeg", "-i", "in.mp4", "out.mp4"])
+
+    assert ok is False

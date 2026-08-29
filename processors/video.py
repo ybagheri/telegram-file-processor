@@ -22,6 +22,33 @@ logger = get_logger(__name__)
 @register_processor("VIDEO")
 class VideoProcessor:
 
+    def _start_processing_progress(self, job, label: str):
+        """Real ffmpeg progress needs the input's duration upfront (the
+        fraction is out_time / duration). When ffprobe can't tell us the
+        duration, we fall back to the honest indeterminate display rather
+        than inventing a percentage — see services/progress.py."""
+
+        total_duration = 0
+
+        try:
+            total_duration = media_service.get_video_info(job.input_file).get("duration") or 0
+        except Exception:
+            logger.warning(
+                "Could not probe input duration for progress reporting (%s)",
+                job.job_id,
+                exc_info=True,
+            )
+
+        if total_duration > 0:
+            callback = job.progress.make_processing_fraction_callback(
+                total_duration=total_duration,
+                label=label,
+            )
+            return callback, total_duration
+
+        job.progress.begin_processing(label=label)
+        return None, 0
+
     async def process(self, job):
 
         logger.info("Video job started (%s)", job.job_id)
@@ -74,6 +101,10 @@ class VideoProcessor:
         if job.options.watermark:
             logo_path = Path(job.options.logo_path) if job.options.logo_path else Paths.LOGO_FILE
 
+        progress_callback, total_duration = self._start_processing_progress(
+            job, "تبدیل ویدیو"
+        )
+
         ok = await media_service.convert_video(
             input_file=job.input_file,
             output_file=output,
@@ -83,6 +114,8 @@ class VideoProcessor:
             preset=profile["preset"],
             logo=logo_path,
             logo_position=job.options.logo_position,
+            progress_callback=progress_callback,
+            total_duration=total_duration,
         )
 
         if not ok:
@@ -143,10 +176,16 @@ class VideoProcessor:
 
         output = job.resolve_output_dir() / (job.stem + ".mp3")
 
+        progress_callback, total_duration = self._start_processing_progress(
+            job, "استخراج MP3"
+        )
+
         ok = await media_service.extract_mp3(
             job.input_file,
             output,
             bitrate=Processing.DEFAULT_AUDIO_BITRATE,
+            progress_callback=progress_callback,
+            total_duration=total_duration,
         )
 
         if not ok:
@@ -189,10 +228,16 @@ class VideoProcessor:
 
         output = job.resolve_output_dir() / (job.stem + ".m4a")
 
+        progress_callback, total_duration = self._start_processing_progress(
+            job, "استخراج M4A"
+        )
+
         ok = await media_service.extract_m4a(
             job.input_file,
             output,
             bitrate=Processing.DEFAULT_AUDIO_BITRATE,
+            progress_callback=progress_callback,
+            total_duration=total_duration,
         )
 
         if not ok:
@@ -234,9 +279,15 @@ class VideoProcessor:
 
         output = job.resolve_output_dir() / (job.stem + ".ogg")
 
+        progress_callback, total_duration = self._start_processing_progress(
+            job, "استخراج پیام صوتی"
+        )
+
         ok = await media_service.extract_voice(
             job.input_file,
             output,
+            progress_callback=progress_callback,
+            total_duration=total_duration,
         )
 
         if not ok:

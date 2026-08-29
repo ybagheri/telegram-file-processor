@@ -73,6 +73,7 @@ def download_to_disk_sync(
     destination: Path,
     max_size: int,
     timeout: int = DEFAULT_TIMEOUT_SECONDS,
+    progress_callback=None,
 ) -> Path:
     """Blocking streaming download. Raises URLDownloadError on any
     failure; on success the file exists at `destination` and its size is
@@ -122,6 +123,8 @@ def download_to_disk_sync(
 
         declared = headers.get("Content-Length")
 
+        declared_size = None
+
         if declared and str(declared).strip().isdigit():
 
             declared_size = int(str(declared).strip())
@@ -170,6 +173,16 @@ def download_to_disk_sync(
 
                     fh.write(chunk)
 
+                    if progress_callback is not None:
+                        try:
+                            progress_callback(received, declared_size)
+                        except Exception:
+                            # A broken progress callback must never take
+                            # the actual download down.
+                            logger.exception(
+                                "URL download progress callback failed"
+                            )
+
         except socket.timeout as e:
             raise URLDownloadError(
                 REASON_TIMEOUT,
@@ -207,9 +220,17 @@ async def download_to_disk(
     destination: Path,
     max_size: int,
     timeout: int = DEFAULT_TIMEOUT_SECONDS,
+    progress_callback=None,
 ) -> Path:
     """Async wrapper — runs the blocking streaming download in a worker
-    thread so the Telethon event loop never blocks."""
+    thread so the Telethon event loop never blocks.
+
+    `progress_callback`, if given, is a plain synchronous `(current,
+    total)` callable — it runs on the worker thread, same as the
+    ProgressReporter callbacks used for Telethon transfers, and must stay
+    cheap (it just updates a few attributes; it never touches Telegram
+    directly). total is None when the server didn't send a usable
+    Content-Length."""
 
     return await asyncio.to_thread(
         download_to_disk_sync,
@@ -217,4 +238,5 @@ async def download_to_disk(
         destination,
         max_size,
         timeout,
+        progress_callback,
     )

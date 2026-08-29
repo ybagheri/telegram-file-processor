@@ -287,6 +287,40 @@ class Processing:
     }
 
 
+class Progress:
+
+    # Master on/off switch for the download/processing/upload progress
+    # messages (services/progress.py). Disabling this restores the old
+    # silent behaviour without touching any call sites.
+    ENABLED = (
+        os.getenv(
+            "PROGRESS_ENABLED",
+            "true",
+        ).lower()
+        == "true"
+    )
+
+    # Minimum time between edits of the single progress message, per job.
+    # Telegram's practical edit-rate limit for one chat is a handful of
+    # edits per second, but staying well under it (and under a pace a
+    # human could even read) avoids ever tripping a flood wait for a
+    # message that isn't essential to the job succeeding.
+    UPDATE_INTERVAL_SECONDS = float(
+        os.getenv(
+            "PROGRESS_UPDATE_INTERVAL_SECONDS",
+            "2.5",
+        )
+    )
+
+    # Number of ● / ○ segments in the progress bar.
+    BAR_LENGTH = int(
+        os.getenv(
+            "PROGRESS_BAR_LENGTH",
+            "10",
+        )
+    )
+
+
 class Logging:
 
     LEVEL = os.getenv(

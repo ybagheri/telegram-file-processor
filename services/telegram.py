@@ -81,7 +81,13 @@ class TelegramService:
     # Download
     # ------------------------------------------------------------------
 
-    async def download(self, message, destination: Path) -> Path | None:
+    async def download(
+        self,
+        message,
+        destination: Path,
+        *,
+        progress_callback=None,
+    ) -> Path | None:
 
         destination.parent.mkdir(
             parents=True,
@@ -91,6 +97,7 @@ class TelegramService:
         try:
             result = await message.download_media(
                 file=str(destination),
+                progress_callback=progress_callback,
             )
         except Exception:
             logger.exception(f"Download failed: {destination}")
@@ -122,6 +129,7 @@ class TelegramService:
         thumb: Path | None = None,
         video_attributes: dict | None = None,
         audio_attributes: dict | None = None,
+        progress_callback=None,
     ):
         attributes = None
 
@@ -156,6 +164,7 @@ class TelegramService:
             voice_note=voice_note,
             thumb=str(thumb) if thumb else None,
             attributes=attributes,
+            progress_callback=progress_callback,
         )
 
     # ------------------------------------------------------------------

@@ -24,7 +24,29 @@ class MediaService:
     # Run Command
     # =====================================================
 
-    async def _run(self, command: list[str]) -> bool:
+    async def _run(
+        self,
+        command: list[str],
+        *,
+        progress_callback=None,
+        total_duration: float = 0,
+    ) -> bool:
+        """Runs an ffmpeg/ffprobe command. When `progress_callback` is
+        given together with a positive `total_duration` (seconds), ffmpeg
+        is asked to report its own progress on stdout (`-progress
+        pipe:1`) and that stream is parsed live so the callback gets real
+        `(elapsed_seconds, total_seconds, fraction)` updates as the
+        command runs — no polling, no guessing. Without both, this runs
+        exactly as before (single `communicate()` call, no extra ffmpeg
+        flags), so every existing call site is unaffected."""
+
+        track_progress = bool(progress_callback) and total_duration > 0
+
+        if track_progress:
+            # Global options; ffmpeg accepts them anywhere in the
+            # argument list, but placing them right after the binary
+            # keeps the rest of each command's own construction untouched.
+            command = [command[0], "-progress", "pipe:1", "-nostats", *command[1:]]
 
         logger.info(" ".join(command))
 
@@ -32,21 +54,95 @@ class MediaService:
 
             *command,
 
-            stdout=asyncio.subprocess.PIPE,
+            stdout=asyncio.subprocess.PIPE if track_progress else asyncio.subprocess.DEVNULL,
 
             stderr=asyncio.subprocess.PIPE,
 
         )
 
-        stdout, stderr = await process.communicate()
+        if track_progress:
+
+            await self._pump_ffmpeg_progress(
+                process.stdout,
+                progress_callback,
+                total_duration,
+            )
+
+            stderr = await process.stderr.read()
+            await process.wait()
+
+        else:
+
+            _stdout, stderr = await process.communicate()
 
         if process.returncode != 0:
 
-            logger.error(stderr.decode())
+            logger.error(stderr.decode(errors="replace") if stderr else "")
 
             return False
 
         return True
+
+    async def _pump_ffmpeg_progress(self, stream, callback, total_duration: float):
+        """Reads ffmpeg's `-progress pipe:1` key=value lines as they
+        arrive and calls `callback(elapsed_seconds, total_seconds,
+        fraction)` for each `out_time_ms`/`out_time` update. Never raises
+        into the caller — a broken progress callback or an unexpected
+        line format must not affect whether the conversion itself
+        succeeds; worst case, progress just stops updating."""
+
+        try:
+
+            while True:
+
+                line = await stream.readline()
+
+                if not line:
+                    break
+
+                try:
+                    text = line.decode(errors="ignore").strip()
+                except Exception:
+                    continue
+
+                if not text or "=" not in text:
+                    continue
+
+                key, _, value = text.partition("=")
+                value = value.strip()
+
+                seconds = None
+
+                if key == "out_time":
+                    # "HH:MM:SS.ffffff"
+                    try:
+                        hours, minutes, secs = value.split(":")
+                        seconds = int(hours) * 3600 + int(minutes) * 60 + float(secs)
+                    except (ValueError, AttributeError):
+                        seconds = None
+
+                elif key == "out_time_ms":
+                    try:
+                        seconds = int(value) / 1_000_000
+                    except ValueError:
+                        seconds = None
+
+                elif key == "progress" and value == "end":
+                    seconds = total_duration
+
+                if seconds is None:
+                    continue
+
+                seconds = max(0.0, min(seconds, total_duration))
+                fraction = (seconds / total_duration) if total_duration > 0 else None
+
+                try:
+                    callback(seconds, total_duration, fraction)
+                except Exception:
+                    logger.exception("ffmpeg progress callback failed")
+
+        except Exception:
+            logger.exception("Failed reading ffmpeg progress output")
 
     # =====================================================
     # Probe
@@ -277,6 +373,8 @@ class MediaService:
         preset: str,
         logo: Path | None = None,
         logo_position: str = "bottom_right",
+        progress_callback=None,
+        total_duration: float = 0,
     ) -> bool:
 
         vf = f"scale={width}:{height}:force_original_aspect_ratio=decrease,pad={width}:{height}:(ow-iw)/2:(oh-ih)/2"
@@ -336,7 +434,11 @@ class MediaService:
 
         ]
 
-        return await self._run(command)
+        return await self._run(
+            command,
+            progress_callback=progress_callback,
+            total_duration=total_duration,
+        )
 
     # =====================================================
     # Extract MP3
@@ -347,6 +449,8 @@ class MediaService:
         input_file: Path,
         output_file: Path,
         bitrate: str = "192k",
+        progress_callback=None,
+        total_duration: float = 0,
     ) -> bool:
 
         command = [
@@ -373,7 +477,11 @@ class MediaService:
 
         ]
 
-        return await self._run(command)
+        return await self._run(
+            command,
+            progress_callback=progress_callback,
+            total_duration=total_duration,
+        )
 
     # =====================================================
     # Extract M4A
@@ -384,6 +492,8 @@ class MediaService:
         input_file: Path,
         output_file: Path,
         bitrate: str = "192k",
+        progress_callback=None,
+        total_duration: float = 0,
     ) -> bool:
 
         command = [
@@ -410,7 +520,11 @@ class MediaService:
 
         ]
 
-        return await self._run(command)
+        return await self._run(
+            command,
+            progress_callback=progress_callback,
+            total_duration=total_duration,
+        )
 
     # =====================================================
     # Extract Voice
@@ -420,6 +534,8 @@ class MediaService:
         self,
         input_file: Path,
         output_file: Path,
+        progress_callback=None,
+        total_duration: float = 0,
     ) -> bool:
 
         command = [

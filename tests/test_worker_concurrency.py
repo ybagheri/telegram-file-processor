@@ -51,7 +51,7 @@ def stub_telegram_happy(monkeypatch):
     async def fake_get_messages(*args, **kwargs):
         return _fake_media_message()
 
-    async def fake_download(message, destination):
+    async def fake_download(message, destination, **kwargs):
         destination.parent.mkdir(parents=True, exist_ok=True)
         destination.write_bytes(b"x")
         return destination

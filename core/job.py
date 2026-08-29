@@ -10,6 +10,7 @@ from uuid import uuid4
 from config import Paths
 from core.constants import JobStatus
 from core.job_options import JobOptions
+from services.progress import NullProgressReporter
 
 
 @dataclass
@@ -124,6 +125,16 @@ class Job:
     # dispatching an extracted file, so that processor.add_output() calls
     # know which folder (relative to the archive root) the file came from.
     current_extract_folder: str = ""
+
+    # Real-time progress reporting (services/progress.py). Defaults to a
+    # no-op reporter so every call site can do `job.progress.report_...`
+    # unconditionally; worker.py swaps in a real ProgressReporter once it
+    # knows the job's destination chat. Never persisted/serialized —
+    # purely a runtime handle, same category as current_extract_folder.
+    progress: object = field(
+        default_factory=NullProgressReporter,
+        repr=False,
+    )
 
     thumbnail: Path | None = None
 

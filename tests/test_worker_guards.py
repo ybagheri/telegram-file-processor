@@ -48,7 +48,7 @@ def stub_telegram(monkeypatch):
     async def fake_send_error(payload):
         sent_errors.append(payload)
 
-    async def fake_download(message, destination):
+    async def fake_download(message, destination, **kwargs):
         raise AssertionError("download must not be attempted for a rejected job")
 
     async def fake_get_messages(*args, **kwargs):
@@ -110,7 +110,7 @@ async def test_process_job_allows_file_exactly_at_the_limit(
 
     worker_module.telegram_service.client.get_messages = fake_get_messages
 
-    async def fake_download(message, destination):
+    async def fake_download(message, destination, **kwargs):
         return None
 
     worker_module.telegram_service.download = fake_download
@@ -239,7 +239,7 @@ async def test_small_files_skip_the_disk_check(
 
     worker_module.telegram_service.client.get_messages = fake_get_messages
 
-    async def fake_download(message, destination):
+    async def fake_download(message, destination, **kwargs):
         return None  # "download failed" — proves it got past the guard
 
     worker_module.telegram_service.download = fake_download

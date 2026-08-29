@@ -199,7 +199,7 @@ async def test_process_url_job_happy_path(monkeypatch, tmp_path):
 
     downloaded = []
 
-    async def fake_download_to_disk(url, destination, max_size):
+    async def fake_download_to_disk(url, destination, max_size, **kwargs):
         downloaded.append((url, max_size))
         destination.parent.mkdir(parents=True, exist_ok=True)
         destination.write_bytes(b"fake video bytes")
@@ -238,7 +238,7 @@ async def test_process_url_job_too_large_gets_persian_error(monkeypatch, tmp_pat
 
     sent = _worker_stubs(monkeypatch, tmp_path)
 
-    async def fake_download_to_disk(url, destination, max_size):
+    async def fake_download_to_disk(url, destination, max_size, **kwargs):
         raise URLDownloadError("too_large", str(Processing.MAX_FILE_SIZE + 5))
 
     monkeypatch.setattr(worker_module, "download_to_disk", fake_download_to_disk)
@@ -269,7 +269,7 @@ async def test_process_url_job_network_failure_gets_persian_error(
 
     sent = _worker_stubs(monkeypatch, tmp_path)
 
-    async def fake_download_to_disk(url, destination, max_size):
+    async def fake_download_to_disk(url, destination, max_size, **kwargs):
         raise URLDownloadError("network", "HTTP 404")
 
     monkeypatch.setattr(worker_module, "download_to_disk", fake_download_to_disk)
@@ -294,7 +294,7 @@ async def test_process_url_job_timeout_gets_persian_error(monkeypatch, tmp_path)
 
     sent = _worker_stubs(monkeypatch, tmp_path)
 
-    async def fake_download_to_disk(url, destination, max_size):
+    async def fake_download_to_disk(url, destination, max_size, **kwargs):
         raise URLDownloadError("timeout", "timed out")
 
     monkeypatch.setattr(worker_module, "download_to_disk", fake_download_to_disk)
@@ -324,7 +324,7 @@ async def test_process_url_job_never_touches_bridge_messages(monkeypatch, tmp_pa
         fake_get_messages,
     )
 
-    async def fake_download_to_disk(url, destination, max_size):
+    async def fake_download_to_disk(url, destination, max_size, **kwargs):
         destination.parent.mkdir(parents=True, exist_ok=True)
         destination.write_bytes(b"x")
         return destination

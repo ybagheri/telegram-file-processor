@@ -25,6 +25,7 @@ from core.protocol import Protocol
 from dispatcher.dispatcher import Dispatcher
 from processors.archive import ArchiveProcessor
 from services.media import media_service
+from services.progress import ProgressReporter
 from services.telegram import telegram_service
 from services.url_downloader import (
     REASON_EMPTY,
@@ -172,6 +173,22 @@ def _has_enough_disk_space(declared_size: int) -> bool:
     return True
 
 
+async def _start_progress(job: Job):
+    """Attaches a real ProgressReporter to the job and sends its first
+    (download-stage) message. Best-effort: ProgressReporter.start()
+    already swallows its own failures, so this never raises."""
+
+    destination = job.options.target_chat_id or job.user_id
+
+    job.progress = ProgressReporter(
+        telegram_service.bot,
+        destination,
+        job.job_id,
+    )
+
+    await job.progress.start()
+
+
 async def _reject_no_disk_space(job: Job, declared_size: int):
 
     logger.warning(
@@ -190,6 +207,8 @@ async def _reject_no_disk_space(job: Job, declared_size: int):
             ),
         )
     )
+
+    await job.progress.finish()
 
     job.cleanup()
 
@@ -216,6 +235,8 @@ async def _reject_too_large(job: Job, size_bytes: int, limit_bytes: int | None =
             message=_file_too_large_message(size_bytes, limit_bytes),
         )
     )
+
+    await job.progress.finish()
 
     job.cleanup()
 
@@ -483,6 +504,8 @@ async def process_job(payload: dict):
 
     job.username = payload.get("username", "")
 
+    await _start_progress(job)
+
     # ------------------------------------------------------------------
     # Resolve a usable filename
     # ------------------------------------------------------------------
@@ -529,6 +552,10 @@ async def process_job(payload: dict):
     job.input_file = await telegram_service.download(
         message,
         input_path,
+        progress_callback=job.progress.make_download_callback(
+            total=job.file_size or None,
+            label=filename,
+        ),
     )
 
     if job.input_file is None:
@@ -548,6 +575,8 @@ async def process_job(payload: dict):
 
         await _send_user_safe_error(job)
 
+        await job.progress.finish()
+
         job.cleanup()
         return
 
@@ -559,6 +588,7 @@ async def process_job(payload: dict):
         # arrived. An exception here propagates through the `async with`
         # and releases the slot — one broken job can't starve the rest.
         async with _get_processing_semaphore():
+            job.progress.begin_processing(label="پردازش فایل")
             success = await dispatcher.dispatch(job)
     except Exception as e:
 
@@ -635,6 +665,8 @@ async def process_url_job(payload: dict, url: str):
 
     job.username = payload.get("username", "")
 
+    await _start_progress(job)
+
     filename = payload.get("file_name") or filename_from_url(url)
 
     job.original_name = strip_excluded(filename, job.options.exclude_text)
@@ -655,6 +687,7 @@ async def process_url_job(payload: dict, url: str):
             url,
             input_path,
             size_limit,
+            progress_callback=job.progress.make_download_callback(label=filename),
         )
     except URLDownloadError as e:
 
@@ -693,6 +726,8 @@ async def process_url_job(payload: dict, url: str):
                 "Failed to send the user error message for job %s", job.job_id
             )
 
+        await job.progress.finish()
+
         job.cleanup()
         return
 
@@ -712,6 +747,8 @@ async def process_url_job(payload: dict, url: str):
         )
 
         await _send_user_safe_error(job)
+
+        await job.progress.finish()
 
         job.cleanup()
         return
@@ -743,6 +780,7 @@ async def process_url_job(payload: dict, url: str):
         else:
             # Same processing semaphore as every other job.
             async with _get_processing_semaphore():
+                job.progress.begin_processing(label="پردازش فایل")
                 success = await dispatcher.dispatch(job)
 
     except Exception as e:
@@ -822,6 +860,8 @@ async def process_multipart_job(payload: dict, part_ids: list[int]):
 
     job.username = payload.get("username", "")
 
+    await _start_progress(job)
+
     job.file_type = "ARCHIVE"
 
     first_name = (messages[0].file.name if messages[0].file else None) or "archive.rar"
@@ -858,6 +898,7 @@ async def process_multipart_job(payload: dict, part_ids: list[int]):
         # Same processing semaphore as single-file jobs — a multi-volume
         # extraction is at least as heavy as anything it competes with.
         async with _get_processing_semaphore():
+            job.progress.begin_processing(label="پردازش آرشیو چندبخشی")
             success = await archive_processor.process_multivolume(job, messages)
     except Exception as e:
 
@@ -991,6 +1032,14 @@ async def _deliver_and_cleanup(job, success: bool, error_message: str):
         # Telegram — without this, the user got the success flow with
         # zero files and no explanation.
         await _send_user_safe_error(job)
+
+    try:
+        await job.progress.finish()
+    except Exception:
+        logger.exception(
+            "Failed to finish/remove the progress message for job %s",
+            job.job_id,
+        )
 
     try:
         job.cleanup()

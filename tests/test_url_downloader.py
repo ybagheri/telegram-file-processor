@@ -221,3 +221,71 @@ def test_zero_byte_response_is_an_error_and_leaves_no_file(fake_urlopen, tmp_pat
 
     assert exc_info.value.reason == REASON_EMPTY
     assert not destination.exists()
+
+
+# ======================================================================
+# Progress reporting
+# ======================================================================
+
+
+def test_progress_callback_receives_cumulative_bytes_and_declared_total(fake_urlopen, tmp_path):
+
+    fake_urlopen(
+        FakeResponse(
+            [b"hello ", b"world!"],
+            {"Content-Length": "12"},
+        )
+    )
+
+    calls = []
+
+    download_to_disk_sync(
+        "https://example.com/f",
+        tmp_path / "f",
+        1000,
+        progress_callback=lambda current, total: calls.append((current, total)),
+    )
+
+    # The fake response's chunk list is just its total byte content —
+    # CHUNK_SIZE (512 KiB) is far bigger than this payload, so the real
+    # read loop drains it in a single read() and calls back once, with
+    # the declared total attached.
+    assert calls == [(12, 12)]
+
+
+def test_progress_callback_gets_none_total_when_content_length_missing(fake_urlopen, tmp_path):
+
+    fake_urlopen(FakeResponse([b"data"], {}))
+
+    calls = []
+
+    download_to_disk_sync(
+        "https://example.com/f",
+        tmp_path / "f",
+        1000,
+        progress_callback=lambda current, total: calls.append((current, total)),
+    )
+
+    # Spec: never invent a total/percentage when the server didn't send
+    # a usable Content-Length.
+    assert calls == [(4, None)]
+
+
+def test_broken_progress_callback_does_not_break_the_download(fake_urlopen, tmp_path):
+
+    fake_urlopen(FakeResponse([b"hello world"], {"Content-Length": "11"}))
+
+    destination = tmp_path / "f"
+
+    def _boom(current, total):
+        raise RuntimeError("boom")
+
+    result = download_to_disk_sync(
+        "https://example.com/f",
+        destination,
+        1000,
+        progress_callback=_boom,
+    )
+
+    assert result == destination
+    assert destination.read_bytes() == b"hello world"

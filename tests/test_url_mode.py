@@ -214,7 +214,7 @@ async def test_direct_upload_skips_processing_and_delivers_untouched(
 
     calls = _worker_stubs(monkeypatch, tmp_path)
 
-    async def fake_download_to_disk(url, destination, max_size):
+    async def fake_download_to_disk(url, destination, max_size, **kwargs):
         destination.parent.mkdir(parents=True, exist_ok=True)
         destination.write_bytes(b"raw file bytes")
         return destination
@@ -253,7 +253,7 @@ async def test_normal_processing_url_still_goes_through_dispatch(
 
     calls = _worker_stubs(monkeypatch, tmp_path)
 
-    async def fake_download_to_disk(url, destination, max_size):
+    async def fake_download_to_disk(url, destination, max_size, **kwargs):
         destination.parent.mkdir(parents=True, exist_ok=True)
         destination.write_bytes(b"raw file bytes")
         return destination

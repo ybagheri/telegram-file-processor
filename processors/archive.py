@@ -753,7 +753,16 @@ class ArchiveProcessor:
 
         destination = job.input_dir / filename
 
-        return await telegram_service.download(message, destination)
+        total = (message.file.size if message.file else None) or None
+
+        return await telegram_service.download(
+            message,
+            destination,
+            progress_callback=job.progress.make_download_callback(
+                total=total,
+                label=f"{filename} (بخش {index})",
+            ),
+        )
 
     def _compute_keep_window(self, volume_size: int, entries) -> int:
 

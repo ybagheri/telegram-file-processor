@@ -7,6 +7,7 @@ from telethon.errors import FloodWaitError
 from core.logger import get_logger
 from core.protocol import Protocol
 
+from services.media import media_service
 from services.telegram import telegram_service
 
 logger = get_logger(__name__)
@@ -54,6 +55,8 @@ async def upload_entry(job, entry) -> bool:
 
     success = False
 
+    file_size = media_service.size(output)
+
     for attempt in range(2):
 
         try:
@@ -70,6 +73,10 @@ async def upload_entry(job, entry) -> bool:
                 thumb=entry.thumbnail,
                 video_attributes=video_attrs,
                 audio_attributes=audio_attrs,
+                progress_callback=job.progress.make_upload_callback(
+                    total=file_size or None,
+                    label=output.name,
+                ),
             )
             success = True
             break
