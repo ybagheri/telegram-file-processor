@@ -101,7 +101,12 @@ Send a file to the bot in a private chat. For video, you'll get an inline-keyboa
 
 ### Sending a direct file link (URL upload)
 
-Instead of uploading a file, you can paste a **direct download link** (a message that is just an `http://` or `https://` URL ending in a supported file type, e.g. `https://example.com/course.part1.rar`). The bot validates the link, then offers the exact same quality/options/target flow as an uploaded file; the server streams the file from the link to disk and processes it identically. Constraints:
+Instead of uploading a file, you can paste a **direct download link** (a message that is just an `http://` or `https://` URL ending in a supported file type, e.g. `https://example.com/course.part1.rar`). The bot validates the link, then asks what should happen to the file after it's downloaded:
+
+- **⬆️ Direct send (no processing)** — the file is streamed from the link to the server and delivered to you exactly as-is, with no conversion, watermark, or any other change. Fastest option.
+- **⚙️ Full processing** — the file enters the exact same quality/options/target flow as an uploaded file (quality, watermark, thumbnails, archive extraction, …) and is processed identically.
+
+Both modes enforce the same size/type limits and run through the same security checks; the only difference is whether the processing pipeline runs. Other constraints:
 
 - `http`/`https` links only; links pointing at local/private network addresses (127.0.0.1, 10.x, 192.168.x, 169.254.x, …) are rejected for security (SSRF protection).
 - The link's filename extension decides the file type — links without a recognizable type are rejected before anything is downloaded.

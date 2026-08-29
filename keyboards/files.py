@@ -97,6 +97,24 @@ def options_keyboard(pid: str, pending_files: dict) -> InlineKeyboardMarkup:
     return InlineKeyboardMarkup(inline_keyboard=rows)
 
 
+def url_mode_keyboard(pid: str) -> InlineKeyboardMarkup:
+    """The choice a user gets when they send a file URL: deliver the
+    downloaded file as-is (no conversion/processing), or feed it through
+    the normal per-file processing flow."""
+
+    return InlineKeyboardMarkup(inline_keyboard=[
+        [InlineKeyboardButton(
+            text="⬆️ ارسال مستقیم (بدون پردازش)",
+            callback_data=f"urlmode:{pid}:direct",
+        )],
+        [InlineKeyboardButton(
+            text="⚙️ پردازش کامل فایل",
+            callback_data=f"urlmode:{pid}:process",
+        )],
+        [InlineKeyboardButton(text="❌ لغو", callback_data=f"urlmode:{pid}:cancel")],
+    ])
+
+
 def target_keyboard(pid: str) -> InlineKeyboardMarkup:
     return InlineKeyboardMarkup(inline_keyboard=[
         [InlineKeyboardButton(text="👤 خودم", callback_data=f"t:{pid}:me")],

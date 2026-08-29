@@ -30,7 +30,7 @@ from handlers.admin import handle_admin_awaited_input
 from handlers.files import handle_file_awaited_input
 from handlers.photo import handle_incoming_photo
 from handlers.settings import handle_settings_awaited_input
-from keyboards.files import options_keyboard, quality_keyboard
+from keyboards.files import options_keyboard, quality_keyboard, url_mode_keyboard
 from models.pending_file import PendingFile
 from services.settings_store import settings_store
 from services.telegram import telegram_service
@@ -185,16 +185,24 @@ async def handle_url_submission(message: Message, url: str) -> None:
         options=_pending_options_from_defaults(defaults),
     )
 
-    if file_type == "VIDEO":
-        await message.answer(
-            "🔻 کیفیت / فرمت خروجی را انتخاب کنید 🔻",
-            reply_markup=quality_keyboard(pid),
-        )
-    else:
-        await message.answer(
-            "تنظیمات این فایل را بررسی و در صورت نیاز تغییر دهید:",
-            reply_markup=options_keyboard(pid, pending_files),
-        )
+    # The per-file options flow only applies to "normal processing" —
+    # first ask which behavior the user wants for this URL. The choice
+    # screen is handled by handlers/files.py's `urlmode:` callback:
+    # "direct" delivers the downloaded file as-is (no processing), while
+    # "process" continues into the exact same flow an uploaded file gets.
+    await message.answer(
+        _URL_MODE_TEXT,
+        reply_markup=url_mode_keyboard(pid),
+    )
+
+
+_URL_MODE_TEXT = (
+    "🔗 فایل از این لینک دانلود می‌شود. بعد از دانلود چه اتفاقی برایش بیفتد؟\n\n"
+    "⬆️ ارسال مستقیم: فایل همین‌طور که هست برای شما ارسال می‌شود — بدون تبدیل، "
+    "واترمارک یا هیچ تغییری (سریع‌ترین حالت).\n\n"
+    "⚙️ پردازش کامل: فایل مثل یک فایل معمولی وارد روند پردازش می‌شود — انتخاب کیفیت، "
+    "واترمارک، تامبنیل، استخراج آرشیو و بقیهٔ تنظیمات."
+)
 
 
 async def handle_awaited_input(message: Message, state: str) -> bool:

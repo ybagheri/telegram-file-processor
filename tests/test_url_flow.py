@@ -115,8 +115,11 @@ async def test_valid_url_creates_pending_entry_like_an_upload(
     assert pending.options["quality"] == DEFAULTS["quality"]
     assert pending.user_id == 555
 
-    # Same video quality-picker prompt as an uploaded video.
-    assert "کیفیت" in answers[0][0]
+    # The mode-choice screen (direct upload vs. normal processing) comes
+    # first now — the quality picker only appears after "process" is
+    # chosen (see tests/test_url_mode.py).
+    assert "ارسال مستقیم" in answers[0][0]
+    assert "پردازش کامل" in answers[0][0]
 
 
 async def test_unknown_file_type_url_is_rejected(monkeypatch, clean_url_state):

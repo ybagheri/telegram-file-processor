@@ -383,9 +383,22 @@ async def process_url_job(payload: dict, url: str):
     error_message = "Processing failed"
 
     try:
-        # Same processing semaphore as every other job.
-        async with _get_processing_semaphore():
-            success = await dispatcher.dispatch(job)
+
+        if payload.get("direct_upload"):
+
+            # "Send it as-is" URL mode: skip the processing pipeline
+            # entirely — the untouched file goes straight into the shared
+            # delivery path as a document. No semaphore: this branch does
+            # no ffmpeg/extraction, so it shouldn't occupy a processing
+            # slot that real conversions are waiting on.
+            job.add_output(job.input_file, kind="document")
+            success = True
+
+        else:
+            # Same processing semaphore as every other job.
+            async with _get_processing_semaphore():
+                success = await dispatcher.dispatch(job)
+
     except Exception as e:
         logger.exception("Unhandled error while dispatching URL job %s", job.job_id)
         success = False

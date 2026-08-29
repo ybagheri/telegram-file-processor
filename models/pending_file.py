@@ -24,5 +24,8 @@ class PendingFile:
     part_message_ids: list = field(default_factory=list)
     # URL-upload mode: when set, there is no Telegram media to forward —
     # finalize_job puts the URL in the job payload and worker.py streams
-    # the file from it directly to disk.
+    # the file from it directly to disk. direct_upload marks the "send it
+    # to me as-is" choice: the worker downloads the file and delivers it
+    # untouched, skipping the processing pipeline entirely.
     url: str = ""
+    direct_upload: bool = False

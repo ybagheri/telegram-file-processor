@@ -14,7 +14,7 @@ from aiogram.types import CallbackQuery, Message
 
 from config import Paths, Telegram
 from core.constants import MessageType
-from keyboards.files import options_keyboard, target_keyboard
+from keyboards.files import options_keyboard, quality_keyboard, target_keyboard
 from models.pending_file import PendingFile
 from services.target_resolver import resolve_target
 from services.telegram import telegram_service
@@ -182,12 +182,61 @@ async def target_pick(callback: CallbackQuery):
         return
 
 
+@router.callback_query(F.data.startswith("urlmode:"))
+async def url_mode_pick(callback: CallbackQuery):
+    """The direct-vs-process choice shown right after a URL submission.
+    "direct" skips the options flow entirely (worker delivers the file
+    untouched); "process" continues with the same quality/options/target
+    flow an uploaded file gets."""
+
+    _, pid, choice = callback.data.split(":")
+    pending = pending_files.get(pid)
+
+    if not pending:
+        await callback.answer("این درخواست منقضی شده است.", show_alert=True)
+        return
+
+    if choice == "direct":
+
+        pending.direct_upload = True
+
+        await finalize_job(callback, pending, pid)
+        return
+
+    if choice == "process":
+
+        if pending.file_type == "VIDEO":
+            await callback.message.edit_text(
+                "🔻 کیفیت / فرمت خروجی را انتخاب کنید 🔻",
+                reply_markup=quality_keyboard(pid),
+            )
+        else:
+            await callback.message.edit_text(
+                "تنظیمات این فایل را بررسی و در صورت نیاز تغییر دهید:",
+                reply_markup=options_keyboard(pid, pending_files),
+            )
+
+        await callback.answer()
+        return
+
+    if choice == "cancel":
+
+        pending_files.pop(pid, None)
+        if awaiting_state.get(pending.user_id, "").startswith(f"file:{pid}:"):
+            awaiting_state.pop(pending.user_id, None)
+
+        await callback.message.edit_text("❌ لغو شد.")
+        await callback.answer()
+
+
 async def finalize_job(callback: CallbackQuery, pending: PendingFile, pid: str):
 
     if pending.url:
 
         # URL-upload mode: there is no Telegram media to forward into the
         # bridge — the worker streams the bytes from the URL itself.
+        # direct_upload marks the "send it as-is" choice (no processing
+        # pipeline on the worker side).
         job_data = {
             "type": MessageType.JOB.value,
             "user_id": pending.user_id,
@@ -197,6 +246,9 @@ async def finalize_job(callback: CallbackQuery, pending: PendingFile, pid: str):
             "original_chat_id": pending.chat_id,
             "options": pending.options,
         }
+
+        if pending.direct_upload:
+            job_data["direct_upload"] = True
 
     elif pending.is_multipart:
 
