@@ -99,9 +99,14 @@ class TelegramService:
         if not result:
             return None
 
-        logger.info(f"Downloaded: {destination}")
+        # Telethon may append an extension (or otherwise change the path)
+        # when the requested name has no extension. Always trust the path
+        # it actually wrote.
+        actual = Path(result)
 
-        return destination
+        logger.info(f"Downloaded: {actual}")
+
+        return actual
 
     # ------------------------------------------------------------------
     # Upload (worker -> bridge group, carries a Protocol caption)

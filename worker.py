@@ -39,10 +39,42 @@ from utils.permissions import get_tier_from_payload, max_file_size_for_tier
 from utils.text import strip_excluded
 from utils.url_validation import filename_from_url
 
+from pathlib import Path   
+
 logger = get_logger(__name__)
 
 dispatcher = Dispatcher()
 archive_processor = ArchiveProcessor()
+
+
+def _extension_from_mime(mime: str) -> str:
+    """Best-effort extension for common media types when Telegram gives
+    no file_name. Returns empty string when unknown."""
+    mime = (mime or "").lower().strip()
+    mapping = {
+        "video/mp4": ".mp4",
+        "video/webm": ".webm",
+        "video/quicktime": ".mov",
+        "video/x-matroska": ".mkv",
+        "video/x-msvideo": ".avi",
+        "audio/mpeg": ".mp3",
+        "audio/mp4": ".m4a",
+        "audio/aac": ".aac",
+        "audio/ogg": ".ogg",
+        "audio/opus": ".opus",
+        "audio/wav": ".wav",
+        "audio/x-wav": ".wav",
+        "application/pdf": ".pdf",
+        "application/zip": ".zip",
+        "application/x-rar": ".rar",
+        "application/vnd.rar": ".rar",
+        "application/x-7z-compressed": ".7z",
+        "image/jpeg": ".jpg",
+        "image/png": ".png",
+        "image/webp": ".webp",
+        "image/gif": ".gif",
+    }
+    return mapping.get(mime, "")
 
 
 def _build_options(raw: dict) -> JobOptions:
@@ -451,6 +483,9 @@ async def process_job(payload: dict):
 
     job.username = payload.get("username", "")
 
+    # ------------------------------------------------------------------
+    # Resolve a usable filename
+    # ------------------------------------------------------------------
     filename = "input"
     mime_type = ""
 
@@ -459,6 +494,13 @@ async def process_job(payload: dict):
         mime_type = message.file.mime_type or ""
         job.file_size = message.file.size or 0
 
+    # Many videos/audios arrive without a file_name (especially when sent
+    # as native video rather than document). Build a stable name with a
+    # sensible extension so the path never becomes bare ".../input/input".
+    if not filename or filename == "input" or Path(filename).suffix == "":
+        ext = _extension_from_mime(mime_type) or ".bin"
+        filename = f"{job.job_id}{ext}"
+
     job.original_name = strip_excluded(filename, job.options.exclude_text)
     job.mime_type = mime_type
 
@@ -466,7 +508,7 @@ async def process_job(payload: dict):
         mime_type,
         filename,
     )
-
+    
     # Tier-aware size enforcement: the user's account tier (resolved by
     # the bot at submission time, carried in the payload) decides the
     # cap. message.file.size is the declared size from Telegram
@@ -478,8 +520,6 @@ async def process_job(payload: dict):
         await _reject_too_large(job, job.file_size, size_limit)
         return
 
-    # Free-disk-space guard: don't even start downloading if there isn't
-    # headroom for the input plus working space (ffmpeg/extraction).
     if not _has_enough_disk_space(job.file_size):
         await _reject_no_disk_space(job, job.file_size)
         return
