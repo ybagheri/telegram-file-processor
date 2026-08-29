@@ -362,6 +362,20 @@ class Tiers:
     )
 
 
+class ErrorReporting:
+
+    # Structured failure reports (core/error_reporting.py) are DM'd to the
+    # admins as one Telegram message. Telegram's hard limit is 4096 chars;
+    # stay under it so the traceback never gets cut off mid-send by the
+    # API rejecting the message.
+    MAX_REPORT_CHARS = int(
+        os.getenv(
+            "ADMIN_REPORT_MAX_CHARS",
+            "3500",
+        )
+    )
+
+
 class Config:
 
     @classmethod
