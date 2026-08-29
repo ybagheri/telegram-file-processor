@@ -44,6 +44,35 @@ async def _resolve_message_link(chat_id: int, message_id: int) -> str:
     return f"https://t.me/c/{internal}/{message_id}"
 
 
+async def _relay_report_to_admins(payload: dict):
+    """DMs a worker-built failure report to every configured admin,
+    following the same one-DM-per-admin pattern as
+    notify_admins_of_new_pending_user(). A report is already fully
+    sanitized and HTML-safe (core/error_reporting.py), so it goes out
+    with parse_mode="HTML" as-is. One unreachable admin must never stop
+    the others from getting the report — and a relay failure here must
+    never take the bridge handler down, so every send is isolated."""
+
+    report = payload.get("report", "")
+
+    if not report:
+        return
+
+    for admin_id in Telegram.ADMIN_IDS:
+
+        try:
+            await telegram_service.send_text(
+                admin_id,
+                report,
+                parse_mode="HTML",
+            )
+        except Exception:
+            logger.exception(
+                "Failed to deliver admin error report to admin %s",
+                admin_id,
+            )
+
+
 @router.message(F.chat.id == Telegram.GROUP_ID)
 async def handle_bridge_message(message: Message):
 
@@ -67,6 +96,16 @@ async def handle_bridge_message(message: Message):
     if message_type == MessageType.HEARTBEAT.value:
 
         worker_last_seen["worker"] = time.time()
+
+        return
+
+    # Structured failure report for the ADMINS (core/error_reporting.py).
+    # Handled BEFORE the user_id gate: a pre-Job failure (e.g. the media
+    # message never fetched) has no user_id, and the report must still
+    # reach the admins. Never relayed to the user.
+    if message_type == MessageType.ADMIN_ERROR.value:
+
+        await _relay_report_to_admins(payload)
 
         return
 

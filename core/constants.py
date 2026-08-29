@@ -10,6 +10,7 @@ class MessageType(str, Enum):
     FOLDER = "folder"     # archive folder announcement (tracked for the TOC)
     DONE = "done"         # job finished -> bot.py may now send the TOC
     HEARTBEAT = "heartbeat"  # worker liveness ping (operator-only, never relayed to users)
+    ADMIN_ERROR = "admin_error"  # structured failure report for the admins (never relayed to users)
 
 
 class JobStatus(str, Enum):

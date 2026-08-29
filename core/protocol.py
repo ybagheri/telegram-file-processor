@@ -115,6 +115,25 @@ class Protocol:
         }
 
     @staticmethod
+    def create_admin_error(
+        *,
+        report: str,
+        user_id: int | None = None,
+        job_id: str = "",
+    ) -> dict:
+        """A structured failure report destined for the ADMINS' DMs, not
+        for the user (see core/error_reporting.py). `report` is the fully
+        built, already-sanitized HTML report text; user_id/job_id ride
+        along only so the bot can log the correlation."""
+
+        return {
+            "type": MessageType.ADMIN_ERROR,
+            "user_id": user_id,
+            "job_id": job_id,
+            "report": report,
+        }
+
+    @staticmethod
     def create_info(
         *,
         user_id: int,
