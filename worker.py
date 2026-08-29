@@ -26,6 +26,7 @@ from services.url_downloader import (
     download_to_disk,
 )
 from utils.filetype import FileTypeDetector
+from utils.permissions import get_tier_from_payload, max_file_size_for_tier
 from utils.text import strip_excluded
 from utils.url_validation import filename_from_url
 
@@ -60,19 +61,31 @@ def _strip_part_suffix(filename: str) -> str:
     return stem_with_ext
 
 
-def _file_too_large_message(size_bytes: int) -> str:
+def _file_too_large_message(size_bytes: int, limit_bytes: int | None = None) -> str:
     """Persian text delivered to the user when a job is rejected for
-    exceeding Processing.MAX_FILE_SIZE — sent through the bridge as a
+    exceeding its tier's file-size cap — sent through the bridge as a
     Protocol.create_error payload (handlers/bridge.py prefixes it with
-    "❌ خطا:")."""
+    "❌ خطا:"). The limit defaults to the global MAX_FILE_SIZE."""
 
-    limit_gb = Processing.MAX_FILE_SIZE / (1024 * 1024 * 1024)
+    if limit_bytes is None:
+        limit_bytes = Processing.MAX_FILE_SIZE
+
+    limit_gb = limit_bytes / (1024 * 1024 * 1024)
     size_gb = size_bytes / (1024 * 1024 * 1024)
 
     return (
         f"حجم فایل ({size_gb:.1f} گیگابایت) بیشتر از حد مجاز "
         f"({limit_gb:.1f} گیگابایت) است."
     )
+
+
+def _size_limit_for_payload(payload: dict) -> int:
+    """The tier-aware file-size cap for the user who submitted this job.
+    The tier is resolved by the bot at submission time and carried in the
+    job payload (see handlers/files.py::finalize_job); a missing/unknown
+    tier falls back to trial — the most restrictive default."""
+
+    return max_file_size_for_tier(get_tier_from_payload(payload))
 
 
 def _required_headroom(declared_size: int) -> int:
@@ -140,23 +153,26 @@ async def _reject_no_disk_space(job: Job, declared_size: int):
     job.cleanup()
 
 
-async def _reject_too_large(job: Job, size_bytes: int):
+async def _reject_too_large(job: Job, size_bytes: int, limit_bytes: int | None = None):
     """Tells the user the job was rejected for size and aborts cleanly.
     Must be called before any download starts, so there's nothing on
     disk to clean up beyond the job's (empty) working directories."""
 
+    if limit_bytes is None:
+        limit_bytes = Processing.MAX_FILE_SIZE
+
     logger.warning(
-        "Job %s rejected: declared size %s bytes exceeds MAX_FILE_SIZE (%s)",
+        "Job %s rejected: declared size %s bytes exceeds the tier size limit (%s)",
         job.job_id,
         size_bytes,
-        Processing.MAX_FILE_SIZE,
+        limit_bytes,
     )
 
     await telegram_service.send_error(
         Protocol.create_error(
             user_id=job.user_id,
             job_id=job.job_id,
-            message=_file_too_large_message(size_bytes),
+            message=_file_too_large_message(size_bytes, limit_bytes),
         )
     )
 
@@ -245,11 +261,15 @@ async def process_job(payload: dict):
         filename,
     )
 
-    # MAX_FILE_SIZE enforcement: message.file.size is the declared size
-    # from Telegram metadata, known before any bytes are transferred —
-    # reject here rather than discovering the overrun mid-download.
-    if job.file_size > Processing.MAX_FILE_SIZE:
-        await _reject_too_large(job, job.file_size)
+    # Tier-aware size enforcement: the user's account tier (resolved by
+    # the bot at submission time, carried in the payload) decides the
+    # cap. message.file.size is the declared size from Telegram
+    # metadata, known before any bytes are transferred — reject here
+    # rather than discovering the overrun mid-download.
+    size_limit = _size_limit_for_payload(payload)
+
+    if job.file_size > size_limit:
+        await _reject_too_large(job, job.file_size, size_limit)
         return
 
     # Free-disk-space guard: don't even start downloading if there isn't
@@ -339,13 +359,17 @@ async def process_url_job(payload: dict, url: str):
         filename,
     )
 
+    # Tier-aware caps for URL jobs too — a link must not be a way around
+    # the user's account limits.
+    size_limit = _size_limit_for_payload(payload)
+
     input_path = job.input_dir / filename
 
     try:
         job.input_file = await download_to_disk(
             url,
             input_path,
-            Processing.MAX_FILE_SIZE,
+            size_limit,
         )
     except URLDownloadError as e:
 
@@ -370,9 +394,9 @@ async def process_url_job(payload: dict, url: str):
     job.file_size = media_service.size(job.input_file)
 
     # Same guards as uploaded files, now sized from the actual bytes on
-    # disk (belt-and-braces on top of the downloader's caps).
-    if job.file_size > Processing.MAX_FILE_SIZE:
-        await _reject_too_large(job, job.file_size)
+    # disk (belt-and-braces on top of the downloader's tier-aware cap).
+    if job.file_size > size_limit:
+        await _reject_too_large(job, job.file_size, size_limit)
         return
 
     if not _has_enough_disk_space(job.file_size):
@@ -436,17 +460,20 @@ async def process_multipart_job(payload: dict, part_ids: list[int]):
     base_name = _strip_part_suffix(first_name)
     job.original_name = strip_excluded(base_name, job.options.exclude_text)
 
-    # MAX_FILE_SIZE enforcement: sum the declared size of every part and
-    # reject before any volume is downloaded (same rule as single-file
-    # jobs — a multi-volume set isn't a way around the size limit).
+    # Tier-aware size enforcement: sum the declared size of every part
+    # and reject before any volume is downloaded (same rule as
+    # single-file jobs — a multi-volume set isn't a way around the
+    # user's account limits).
+    size_limit = _size_limit_for_payload(payload)
+
     total_size = sum(
         (m.file.size or 0)
         for m in messages
         if m.file
     )
 
-    if total_size > Processing.MAX_FILE_SIZE:
-        await _reject_too_large(job, total_size)
+    if total_size > size_limit:
+        await _reject_too_large(job, total_size, size_limit)
         return
 
     # Same free-disk-space guard, sized from the declared *total* of the

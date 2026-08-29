@@ -19,7 +19,7 @@ from keyboards.settings import logo_position_keyboard, settings_text_and_keyboar
 from services.settings_store import settings_store
 from services.target_resolver import resolve_target
 from services.telegram import telegram_service
-from utils.access_control import is_authorized, not_authorized_text, track_pending_user_if_needed
+from utils.access_control import track_pending_user_if_needed
 from state import awaiting_state
 
 router = Router(name="settings")
@@ -33,9 +33,8 @@ bot = telegram_service.bot
 @router.message(Command("settings"), F.chat.type == "private")
 async def settings_command(message: Message):
     await track_pending_user_if_needed(message)
-    if not is_authorized(message.from_user.id):
-        await message.answer(not_authorized_text(message.from_user.id))
-        return
+    # Access tiers: unauthorized users are no longer hard-blocked — they
+    # use the bot as trial users, and /settings works the same for them.
     await message.answer(**settings_text_and_keyboard(message.from_user.id))
 
 

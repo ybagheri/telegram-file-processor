@@ -311,6 +311,9 @@ class RateLimiting:
 
     # Per-user submission cap: at most MAX_FILES new file submissions per
     # WINDOW_MINUTES. MAX_FILES <= 0 disables the limiter entirely.
+    # These are the TRIAL-tier values — admins bypass rate limiting and
+    # paid users have their own (see Tiers.PAID_RATE_LIMIT_*), so this
+    # section only governs trial/free users.
     MAX_FILES = int(
         os.getenv(
             "RATE_LIMIT_MAX_FILES",
@@ -321,6 +324,39 @@ class RateLimiting:
     WINDOW_MINUTES = int(
         os.getenv(
             "RATE_LIMIT_WINDOW_MINUTES",
+            "10",
+        )
+    )
+
+
+class Tiers:
+
+    # Account-tier-specific limits. The classification itself lives in
+    # utils/permissions.py (Admin = ADMIN_IDS, Paid = active authorized
+    # user in the access DB, Trial = everyone else) — this class only
+    # holds the numbers.
+    #
+    # Trial-only file-size cap in bytes, applied on top of MAX_FILE_SIZE.
+    # 0 = disabled: trial users get the same MAX_FILE_SIZE as everyone.
+    TRIAL_MAX_FILE_SIZE = int(
+        os.getenv(
+            "TRIAL_MAX_FILE_SIZE",
+            "0",
+        )
+    )
+
+    # Paid users' submission rate limit. 0 disables it — paid users are
+    # by default NOT subject to the trial submission caps.
+    PAID_RATE_LIMIT_MAX_FILES = int(
+        os.getenv(
+            "PAID_RATE_LIMIT_MAX_FILES",
+            "0",
+        )
+    )
+
+    PAID_RATE_LIMIT_WINDOW_MINUTES = int(
+        os.getenv(
+            "PAID_RATE_LIMIT_WINDOW_MINUTES",
             "10",
         )
     )

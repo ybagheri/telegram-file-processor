@@ -1,12 +1,13 @@
 """
 Tests for per-user file-submission rate limiting: the pure sliding-window
 logic in utils/rate_limit.py, and handlers/core.py's
-check_submission_rate_limit wiring (shared state dict, config knobs).
+check_submission_rate_limit wiring (shared state dict, config knobs,
+tier-aware limits via utils/permissions.py).
 """
 
 import time
 
-from types import SimpleNamespace
+import pytest
 
 from config import RateLimiting
 
@@ -83,17 +84,16 @@ def test_record_submission_appends():
 # ======================================================================
 
 
-def _fake_submission_message():
+@pytest.fixture(autouse=True)
+def clean_access_store():
+    """The tier classification consults the real access_store singleton —
+    keep it empty so every user here classifies as trial tier regardless
+    of test order (same pattern as tests/test_router_wiring.py)."""
 
-    return SimpleNamespace(
-        from_user=SimpleNamespace(id=777),
-        chat=SimpleNamespace(type="private", id=777),
-        document=SimpleNamespace(file_name="video.mp4", mime_type="video/mp4"),
-        video=None,
-        audio=None,
-        photo=None,
-        text=None,
-    )
+    from services.access_store import access_store
+
+    access_store._conn.execute("DELETE FROM authorized_users")
+    access_store._conn.commit()
 
 
 def test_check_submission_rate_limit_allows_then_rejects(monkeypatch):
@@ -105,12 +105,12 @@ def test_check_submission_rate_limit_allows_then_rejects(monkeypatch):
 
     core.user_submission_times.pop(777, None)
 
-    message = _fake_submission_message()
-
     try:
-        assert core.check_submission_rate_limit(777, message) is True
-        assert core.check_submission_rate_limit(777, message) is True
-        assert core.check_submission_rate_limit(777, message) is False
+        # New tier-aware API: returns (allowed, max_files, window_minutes)
+        # with the limits actually applied for the user's tier.
+        assert core.check_submission_rate_limit(777) == (True, 2, 10)
+        assert core.check_submission_rate_limit(777) == (True, 2, 10)
+        assert core.check_submission_rate_limit(777) == (False, 2, 10)
     finally:
         core.user_submission_times.pop(777, None)
 
@@ -124,15 +124,13 @@ def test_check_submission_rate_limit_window_expiry(monkeypatch):
 
     core.user_submission_times.pop(778, None)
 
-    message = _fake_submission_message()
-
     try:
-        assert core.check_submission_rate_limit(778, message) is True
+        assert core.check_submission_rate_limit(778) == (True, 1, 10)
 
         # Simulate the single submission being 20 minutes old.
         core.user_submission_times[778][0] = time.time() - 20 * 60
 
-        assert core.check_submission_rate_limit(778, message) is True
+        assert core.check_submission_rate_limit(778) == (True, 1, 10)
     finally:
         core.user_submission_times.pop(778, None)
 
@@ -145,7 +143,7 @@ def test_check_submission_rate_limit_records_per_user():
     core.user_submission_times.pop(780, None)
 
     try:
-        core.check_submission_rate_limit(779, _fake_submission_message())
+        core.check_submission_rate_limit(779)
 
         # Only user 779's history was touched — user 780 has none.
         assert 779 in core.user_submission_times
@@ -153,3 +151,26 @@ def test_check_submission_rate_limit_records_per_user():
     finally:
         core.user_submission_times.pop(779, None)
         core.user_submission_times.pop(780, None)
+
+
+def test_check_submission_rate_limit_admin_bypasses(monkeypatch):
+
+    import handlers.core as core
+    from config import Telegram
+
+    core.user_submission_times.pop(781, None)
+
+    monkeypatch.setattr(RateLimiting, "MAX_FILES", 1)
+    monkeypatch.setattr(RateLimiting, "WINDOW_MINUTES", 10)
+    monkeypatch.setattr(Telegram, "ADMIN_IDS", [781])
+
+    try:
+        # Admins bypass the limiter entirely: unlimited submissions, and
+        # the reported limits are (0, 0) — "off".
+        for _ in range(5):
+            assert core.check_submission_rate_limit(781) == (True, 0, 0)
+
+        # Nothing was recorded for the admin either.
+        assert 781 not in core.user_submission_times
+    finally:
+        core.user_submission_times.pop(781, None)

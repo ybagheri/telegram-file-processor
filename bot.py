@@ -42,8 +42,6 @@ from state import (
 )
 from utils.access_control import (
     is_admin,
-    is_authorized,
-    not_authorized_text,
     compute_expiry,
     format_expiry,
     _extract_target_from_message,

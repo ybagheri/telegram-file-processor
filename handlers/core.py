@@ -24,7 +24,6 @@ from aiogram import F, Router
 from aiogram.filters import Command
 from aiogram.types import Message
 
-from config import RateLimiting
 from core.protocol import Protocol
 from handlers.admin import handle_admin_awaited_input
 from handlers.files import handle_file_awaited_input
@@ -35,9 +34,12 @@ from models.pending_file import PendingFile
 from services.settings_store import settings_store
 from services.telegram import telegram_service
 from state import admin_flow, awaiting_state, pending_files, pending_passwords, user_submission_times
-from utils.access_control import is_authorized, not_authorized_text, track_pending_user_if_needed
+from utils.access_control import track_pending_user_if_needed
 from utils.filetype import FileTypeDetector
-from utils.rate_limit import is_rate_limited, record_submission
+from utils.permissions import (
+    check_tier_submission,
+    max_file_size_for_user,
+)
 from utils.url_validation import (
     REASON_BAD_SCHEME,
     REASON_NO_HOST,
@@ -62,33 +64,30 @@ def _rate_limit_text(max_files: int, window_minutes: int) -> str:
     )
 
 
-def check_submission_rate_limit(user_id: int, message: Message) -> bool:
-    """Returns True when the submission is ALLOWED (and records it);
-    False when the user is over the cap (caller sends the Persian
-    rejection message). Sits alongside is_authorized(...) — it never
-    replaces the access check, which must run first."""
+def check_submission_rate_limit(user_id: int) -> tuple[bool, int, int]:
+    """Tier-aware submission gate. Returns (allowed, max_files,
+    window_minutes) — the limits values are the tier's actually-applied
+    ones, so the caller can build an accurate rejection message. Records
+    the submission when allowed. Admins bypass rate limiting entirely,
+    paid users use the paid limits (disabled by default), trial users
+    get the trial limits."""
 
     history = user_submission_times.setdefault(user_id, [])
 
     now = time.time()
-    window_seconds = RateLimiting.WINDOW_MINUTES * 60
 
-    if is_rate_limited(
+    allowed, (max_files, window_minutes) = check_tier_submission(
+        user_id,
         history,
         now,
-        RateLimiting.MAX_FILES,
-        window_seconds,
-    ):
-        return False
-
-    record_submission(history, now)
+    )
 
     # Keep the dict from growing without bound: a user with no timestamps
     # left after pruning doesn't need an entry.
     if not history:
         user_submission_times.pop(user_id, None)
 
-    return True
+    return allowed, max_files, window_minutes
 
 
 def _url_error_text(reason: str) -> str:
@@ -152,13 +151,12 @@ async def handle_url_submission(message: Message, url: str) -> None:
         return
 
     # Same cap as direct uploads — a URL isn't a way around rate limiting.
-    if not check_submission_rate_limit(user_id, message):
-        await message.answer(
-            _rate_limit_text(
-                RateLimiting.MAX_FILES,
-                RateLimiting.WINDOW_MINUTES,
-            )
-        )
+    # Tier-aware: admins bypass, paid users get the paid limits, trial
+    # users the trial ones.
+    allowed, max_files, window_minutes = check_submission_rate_limit(user_id)
+
+    if not allowed:
+        await message.answer(_rate_limit_text(max_files, window_minutes))
         return
 
     filename = filename_from_url(url)
@@ -240,10 +238,10 @@ async def start(message: Message):
     # just here.
     await track_pending_user_if_needed(message)
 
-    if not is_authorized(user_id):
-        await message.answer(not_authorized_text(user_id))
-        return
-
+    # Access tiers: unauthorized users are no longer hard-blocked — they
+    # use the bot as trial users (see utils/permissions.py). The pending
+    # tracking above still notifies the admin so they can upgrade the
+    # account to paid.
     await message.answer(
         "سلام! فایل خود را ارسال کنید.\n"
         "برای تنظیم مقادیر پیش‌فرض از /settings استفاده کنید."
@@ -294,9 +292,9 @@ async def handle_private_message(message: Message):
     # sends files straight away without ever sending /start first).
     await track_pending_user_if_needed(message)
 
-    if not is_authorized(user_id):
-        await message.answer(not_authorized_text(user_id))
-        return
+    # NOTE: no hard access gate here anymore — unauthorized users proceed
+    # as trial users, subject to the trial limits (rate limit below and
+    # the tier file-size cap in the size check).
 
     # ------------------------------------------------------------
     # Password reply for a pending encrypted archive
@@ -340,16 +338,15 @@ async def handle_private_message(message: Message):
         return
 
     # Per-user rate limiting: reject (with a friendly Persian message)
-    # when this user has already submitted their cap of files within the
-    # configured window. Applied only to actual new submissions —
-    # password replies and awaited-input flows above are never blocked.
-    if not check_submission_rate_limit(user_id, message):
-        await message.answer(
-            _rate_limit_text(
-                RateLimiting.MAX_FILES,
-                RateLimiting.WINDOW_MINUTES,
-            )
-        )
+    # when this user has already submitted their tier's cap of files
+    # within the configured window. Tier-aware — admins bypass, paid
+    # users get the paid limits, trial users the trial ones. Applied only
+    # to actual new submissions — password replies and awaited-input
+    # flows above are never blocked.
+    allowed, max_files, window_minutes = check_submission_rate_limit(user_id)
+
+    if not allowed:
+        await message.answer(_rate_limit_text(max_files, window_minutes))
         return
 
     file_name = getattr(file, "file_name", None) or f"file_{message.message_id}"
@@ -359,6 +356,21 @@ async def handle_private_message(message: Message):
 
     if file_type == "UNKNOWN":
         await message.answer("نوع فایل پشتیبانی نمی‌شود.")
+        return
+
+    # Tier-aware file-size cap: Telegram knows the declared size before
+    # anything is downloaded, so trial users over their cap get rejected
+    # right here instead of after the worker picked the job up. The
+    # worker re-checks against the same tier limit as belt-and-braces.
+    file_size = getattr(file, "size", 0) or 0
+
+    size_limit = max_file_size_for_user(user_id)
+
+    if file_size > size_limit:
+        await message.answer(
+            f"حجم فایل ({file_size / (1024 * 1024 * 1024):.1f} گیگابایت) بیشتر از "
+            f"حد مجاز حساب شما ({size_limit / (1024 * 1024 * 1024):.1f} گیگابایت) است."
+        )
         return
 
     defaults = settings_store.get(user_id)

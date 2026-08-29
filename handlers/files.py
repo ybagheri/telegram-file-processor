@@ -19,6 +19,7 @@ from models.pending_file import PendingFile
 from services.target_resolver import resolve_target
 from services.telegram import telegram_service
 from state import awaiting_state, pending_files
+from utils.permissions import get_account_tier
 
 router = Router(name="files")
 bot = telegram_service.bot
@@ -245,6 +246,7 @@ async def finalize_job(callback: CallbackQuery, pending: PendingFile, pid: str):
             "file_name": pending.file_name,
             "original_chat_id": pending.chat_id,
             "options": pending.options,
+            "account_tier": get_account_tier(pending.user_id).value,
         }
 
         if pending.direct_upload:
@@ -261,6 +263,7 @@ async def finalize_job(callback: CallbackQuery, pending: PendingFile, pid: str):
             "file_name": pending.file_name,
             "original_chat_id": pending.chat_id,
             "options": pending.options,
+            "account_tier": get_account_tier(pending.user_id).value,
         }
 
     else:
@@ -275,6 +278,7 @@ async def finalize_job(callback: CallbackQuery, pending: PendingFile, pid: str):
             "file_name": pending.file_name,
             "original_chat_id": pending.chat_id,
             "options": pending.options,
+            "account_tier": get_account_tier(pending.user_id).value,
         }
 
     await telegram_service.send_job(job_data)

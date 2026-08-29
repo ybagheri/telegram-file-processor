@@ -258,26 +258,43 @@ async def test_ordinary_start_still_reaches_its_handler_not_swallowed(api_calls)
     await bot_module.dp.feed_update(bot_module.bot, update)
 
     sent = _sent_messages(api_calls)
-    # a brand-new, non-authorized user's /start also fires phase 6's
-    # pending-user admin notifications (one per configured admin) plus the
-    # not-authorized reply to the user themselves.
+    # a brand-new, non-authorized user's /start gets the trial-tier
+    # welcome (no hard "اجازه" block anymore — see utils/permissions.py),
+    # plus phase 6's pending-user admin notifications (one per configured
+    # admin) still fire from track_pending_user_if_needed.
     reply_to_user = [c for c in sent if c.chat_id == non_admin_id]
     assert len(reply_to_user) == 1
-    assert "اجازه" in reply_to_user[0].text
+    assert "فایل خود را ارسال کنید" in reply_to_user[0].text
 
 
 @pytest.mark.asyncio
 async def test_plain_text_message_reaches_catchall_router(api_calls):
-    non_admin_id = 987654321
-    chat = Chat(id=non_admin_id, type="private")
-    user = TgUser(id=non_admin_id, is_bot=False, first_name="Regular")
+    from services.pending_user_store import pending_user_store
+    pending_user_store._conn.execute("DELETE FROM pending_users")
+    pending_user_store._conn.commit()
+
+    # A fresh id: a plain text message produces no reply to the user
+    # itself anymore (no not-authorized gate, no URL, no file), so the
+    # observable proof that the catchall router ran is the pending-user
+    # admin notification that track_pending_user_if_needed fires from
+    # inside handle_private_message.
+    fresh_user_id = 987654322
+    chat = Chat(id=fresh_user_id, type="private")
+    user = TgUser(id=fresh_user_id, is_bot=False, first_name="Plain")
     msg = Message(message_id=2, date=int(time.time()), chat=chat, from_user=user, text="hello there")
     update = Update(update_id=2, message=msg)
 
     await bot_module.dp.feed_update(bot_module.bot, update)
 
+    from config import Telegram
+
     sent = _sent_messages(api_calls)
-    assert len(sent) == 1, f"expected plain text to reach handle_private_message, got {api_calls}"
+    admin_ids = tuple(Telegram.ADMIN_IDS)
+    admin_notifications = [c for c in sent if c.chat_id in admin_ids]
+    user_replies = [c for c in sent if c.chat_id == fresh_user_id]
+    assert len(admin_notifications) == len(admin_ids), f"expected one notification per admin, got {api_calls}"
+    assert str(fresh_user_id) in admin_notifications[0].text
+    assert user_replies == []
 
 
 @pytest.mark.asyncio

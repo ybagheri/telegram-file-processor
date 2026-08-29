@@ -12,7 +12,7 @@ from types import SimpleNamespace
 
 import pytest
 
-from config import Paths, Processing
+from config import Paths, Processing, RateLimiting
 
 import handlers.core as core
 
@@ -137,8 +137,16 @@ async def test_unknown_file_type_url_is_rejected(monkeypatch, clean_url_state):
 async def test_url_submissions_respect_the_rate_limit(monkeypatch, clean_url_state):
 
     monkeypatch.setattr(core, "validate_url", lambda url: (True, "ok"))
-    monkeypatch.setattr(core.RateLimiting, "MAX_FILES", 1)
-    monkeypatch.setattr(core.RateLimiting, "WINDOW_MINUTES", 10)
+    monkeypatch.setattr(RateLimiting, "MAX_FILES", 1)
+    monkeypatch.setattr(RateLimiting, "WINDOW_MINUTES", 10)
+
+    # The submission gate is tier-aware now — make sure user 555
+    # classifies as trial (the limited tier) no matter what earlier
+    # tests left in the shared access DB.
+    from services.access_store import access_store
+
+    access_store._conn.execute("DELETE FROM authorized_users")
+    access_store._conn.commit()
 
     # Fill the user's window: next submission must be rejected.
     shared_state.user_submission_times[555] = [time.time()]
