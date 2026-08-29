@@ -1,6 +1,9 @@
 import asyncio
 import re
 import shutil
+import time
+
+from dataclasses import asdict
 
 from telethon import events
 from telethon.errors import FloodWaitError
@@ -8,6 +11,12 @@ from telethon.errors import FloodWaitError
 from config import Heartbeat, Paths, Processing, Telegram
 from core.constants import MessageType
 from core.delivery import upload_entry
+from core.error_reporting import (
+    ErrorCode,
+    JobStage,
+    USER_SAFE_ERROR_TEXT,
+    build_admin_report,
+)
 from core.job import Job
 from core.job_options import JobOptions
 from core.logger import get_logger
@@ -205,7 +214,187 @@ def _get_processing_semaphore() -> asyncio.Semaphore:
     return _processing_semaphore
 
 
+def _job_report_context(job: Job, operation: str) -> dict:
+    """The Job-derived fields every admin failure report carries."""
+
+    return {
+        "job_id": job.job_id,
+        "user_id": job.user_id,
+        "username": job.username,
+        "chat_id": job.options.target_chat_id or None,
+        "file_name": job.original_name,
+        "file_size": job.file_size,
+        "file_type": job.file_type,
+        "operation": operation,
+        "job_status": job.status,
+        "options": asdict(job.options),
+    }
+
+
+async def _report_job_failure(
+    job: Job,
+    operation: str,
+    *,
+    stage: JobStage,
+    code: ErrorCode,
+    exception: BaseException | None = None,
+    exception_message: str | None = None,
+    duration_seconds: float | None = None,
+    extra_lines: list[str] | None = None,
+    url: str = "",
+):
+    """Single structured-failure entry point for job-stage errors: one
+    structured log line (code/stage/operation are greppable) plus one
+    sanitized HTML report DM'd to the admins through the bridge. Never
+    raises — a reporting failure must not mask the original error or
+    take the pipeline down."""
+
+    logger.error(
+        "job_id=%s stage=%s code=%s operation=%s user_id=%s file=%r: %s",
+        job.job_id,
+        stage.value,
+        code.value,
+        operation,
+        job.user_id,
+        job.original_name,
+        exception_message
+        or (f"{type(exception).__name__}: {exception}" if exception else "failed"),
+        exc_info=exception,
+    )
+
+    # Everything below is best-effort: a bug IN the reporting itself must
+    # never escape into the pipeline — the job's own error handling (and
+    # the user's safe error line) has already been decided by the caller.
+    try:
+        report = build_admin_report(
+            stage=stage,
+            code=code,
+            exception=exception,
+            exception_message=exception_message,
+            duration_seconds=duration_seconds,
+            extra_lines=extra_lines,
+            url=url,
+            **_job_report_context(job, operation),
+        )
+
+        await telegram_service.send_error(
+            Protocol.create_admin_error(
+                report=report,
+                user_id=job.user_id,
+                job_id=job.job_id,
+            )
+        )
+    except Exception:
+        logger.exception(
+            "Failed to send the admin error report for job %s", job.job_id
+        )
+
+
+def _payload_report_context(payload: dict, job_label: str) -> dict:
+    """Report fields for failures that happen BEFORE a Job object exists
+    (media fetch, payload dispatch) — everything comes from the raw
+    payload, so file_size/options-level detail is whatever the bot sent."""
+
+    return {
+        "job_id": job_label,
+        "user_id": payload.get("user_id"),
+        "username": payload.get("username", ""),
+        "file_name": payload.get("file_name", ""),
+        "file_type": payload.get("file_type", ""),
+        "operation": "payload_dispatch",
+    }
+
+
+async def _report_payload_failure(payload: dict, exception: BaseException):
+    """Failure outside the Job lifecycle (e.g. the bridge media message
+    can't be fetched). Previously this was only logged — the user got
+    silence and the operator had nothing but the worker log file. Now:
+    structured log + admin report + one safe line to the user."""
+
+    message_id = payload.get("message_id")
+
+    part_ids = payload.get("part_message_ids")
+
+    if message_id:
+        job_label = f"unknown:{message_id}"
+    elif part_ids:
+        job_label = f"unknown:parts-{part_ids[0]}"
+    else:
+        job_label = "unknown"
+
+    logger.error(
+        "job_id=%s stage=%s code=%s: %s",
+        job_label,
+        JobStage.QUEUE.value,
+        ErrorCode.QUEUE_FAILED.value,
+        f"{type(exception).__name__}: {exception}",
+        exc_info=exception,
+    )
+
+    user_id = payload.get("user_id")
+
+    # Same best-effort guarantee as _report_job_failure: building the
+    # report from raw payload data must never raise into the caller.
+    try:
+        report = build_admin_report(
+            stage=JobStage.QUEUE,
+            code=ErrorCode.QUEUE_FAILED,
+            exception=exception,
+            **_payload_report_context(payload, job_label),
+        )
+
+        await telegram_service.send_error(
+            Protocol.create_admin_error(
+                report=report,
+                user_id=user_id,
+                job_id=job_label,
+            )
+        )
+    except Exception:
+        logger.exception(
+            "Failed to send the admin error report for payload %s", job_label
+        )
+
+    if not user_id:
+        return
+
+    try:
+        await telegram_service.send_error(
+            Protocol.create_error(
+                user_id=user_id,
+                job_id=job_label,
+                message=USER_SAFE_ERROR_TEXT,
+            )
+        )
+    except Exception:
+        logger.exception(
+            "Failed to send the user error message for payload %s", job_label
+        )
+
+
+async def _send_user_safe_error(job: Job, message: str = USER_SAFE_ERROR_TEXT):
+    """One safe, internal-free error line to the user through the bridge.
+    Failing to deliver even this must not raise (the failure report has
+    already gone out; the worker log has the rest)."""
+
+    try:
+        await telegram_service.send_error(
+            Protocol.create_error(
+                user_id=job.user_id,
+                job_id=job.job_id,
+                message=message,
+                target_chat_id=job.options.target_chat_id,
+            )
+        )
+    except Exception:
+        logger.exception(
+            "Failed to send the user error message for job %s", job.job_id
+        )
+
+
 async def process_job(payload: dict):
+
+    started = time.monotonic()
 
     part_ids = payload.get("part_message_ids")
 
@@ -230,13 +419,28 @@ async def process_job(payload: dict):
     # forwarded/copied into the group by bot.py). We fetch the real
     # media message by its id instead of relying on whatever message
     # happened to trigger this handler.
-    message = await telegram_service.client.get_messages(
-        Telegram.GROUP_ID,
-        ids=message_id,
-    )
+    try:
+        message = await telegram_service.client.get_messages(
+            Telegram.GROUP_ID,
+            ids=message_id,
+        )
+    except Exception as e:
+        await _report_payload_failure(payload, e)
+        return
 
     if message is None or not message.media:
-        logger.warning("Job message %s has no media", message_id)
+
+        # This used to be log-and-return: the user got silence and the
+        # operator had to grep the worker log to even notice. The bot
+        # validated the media at submission time, so this is a real
+        # pipeline failure (message deleted/expired, wrong id, ...) and
+        # is reported as one.
+        await _report_payload_failure(
+            payload,
+            RuntimeError(
+                f"bridge media message {message_id} has no media"
+            ),
+        )
         return
 
     job = Job(
@@ -244,6 +448,8 @@ async def process_job(payload: dict):
         message_id=message_id,
         options=_build_options(payload.get("options", {})),
     )
+
+    job.username = payload.get("username", "")
 
     filename = "input"
     mime_type = ""
@@ -287,19 +493,23 @@ async def process_job(payload: dict):
 
     if job.input_file is None:
 
-        await telegram_service.send_error(
-            Protocol.create_error(
-                user_id=job.user_id,
-                job_id=job.job_id,
-                message="Download failed",
-            )
+        # telegram_service.download already logs the underlying Telethon
+        # exception — here we report the stage failure upward.
+        await _report_job_failure(
+            job,
+            "single_file",
+            stage=JobStage.DOWNLOAD,
+            code=ErrorCode.DOWNLOAD_FAILED,
+            exception_message=(
+                f"Telethon download_media returned None for message {message_id}"
+            ),
+            duration_seconds=time.monotonic() - started,
         )
+
+        await _send_user_safe_error(job)
 
         job.cleanup()
         return
-
-    success = False
-    error_message = "Processing failed"
 
     try:
         # The semaphore wraps ONLY the processing step (ffmpeg/extract —
@@ -311,9 +521,40 @@ async def process_job(payload: dict):
         async with _get_processing_semaphore():
             success = await dispatcher.dispatch(job)
     except Exception as e:
-        logger.exception("Unhandled error while dispatching job %s", job.job_id)
+
         success = False
-        error_message = (str(e) or "Processing failed")[:300]
+        error_message = USER_SAFE_ERROR_TEXT
+
+        await _report_job_failure(
+            job,
+            "single_file",
+            stage=JobStage.PROCESSING,
+            code=ErrorCode.PROCESSING_FAILED,
+            exception=e,
+            duration_seconds=time.monotonic() - started,
+        )
+
+    else:
+
+        error_message = USER_SAFE_ERROR_TEXT
+
+        if not success:
+
+            # Graceful False (e.g. no processor for the file type). The
+            # dispatcher/processor already logged the specific reason —
+            # the report carries the job context so the operator can
+            # correlate, no traceback exists in this path.
+            await _report_job_failure(
+                job,
+                "single_file",
+                stage=JobStage.PROCESSING,
+                code=ErrorCode.PROCESSING_FAILED,
+                exception_message=(
+                    "dispatcher returned success=False "
+                    "(see the preceding processor log lines for the reason)"
+                ),
+                duration_seconds=time.monotonic() - started,
+            )
 
     await _deliver_and_cleanup(job, success, error_message)
 
@@ -344,11 +585,15 @@ async def process_url_job(payload: dict, url: str):
     parallel pipeline, the only new piece is "bytes from a URL" instead
     of "bytes from a Telegram message"."""
 
+    started = time.monotonic()
+
     job = Job(
         user_id=payload["user_id"],
         message_id=0,  # no bridge media message exists for URL jobs
         options=_build_options(payload.get("options", {})),
     )
+
+    job.username = payload.get("username", "")
 
     filename = payload.get("file_name") or filename_from_url(url)
 
@@ -380,13 +625,53 @@ async def process_url_job(payload: dict, url: str):
             e.detail,
         )
 
-        await telegram_service.send_error(
-            Protocol.create_error(
-                user_id=job.user_id,
-                job_id=job.job_id,
-                message=_url_download_error_text(e.reason, e.detail),
-            )
+        # The user's mapped Persian text stays (it's already safe and
+        # specific); the admin additionally gets the structured report.
+        await _report_job_failure(
+            job,
+            "url_download",
+            stage=JobStage.DOWNLOAD,
+            code=ErrorCode.DOWNLOAD_FAILED,
+            exception=e,
+            url=url,
+            duration_seconds=time.monotonic() - started,
         )
+
+        try:
+            await telegram_service.send_error(
+                Protocol.create_error(
+                    user_id=job.user_id,
+                    job_id=job.job_id,
+                    message=_url_download_error_text(e.reason, e.detail),
+                )
+            )
+        except Exception:
+
+            # Never let a failed user notification replace the structured
+            # admin report / logging that already happened above.
+            logger.exception(
+                "Failed to send the user error message for job %s", job.job_id
+            )
+
+        job.cleanup()
+        return
+
+    except Exception as e:
+
+        # A non-URLDownloadError here used to propagate out of the whole
+        # pipeline (user silence, no cleanup). Report it like any other
+        # download failure.
+        await _report_job_failure(
+            job,
+            "url_download",
+            stage=JobStage.DOWNLOAD,
+            code=ErrorCode.DOWNLOAD_FAILED,
+            exception=e,
+            url=url,
+            duration_seconds=time.monotonic() - started,
+        )
+
+        await _send_user_safe_error(job)
 
         job.cleanup()
         return
@@ -402,9 +687,6 @@ async def process_url_job(payload: dict, url: str):
     if not _has_enough_disk_space(job.file_size):
         await _reject_no_disk_space(job, job.file_size)
         return
-
-    success = False
-    error_message = "Processing failed"
 
     try:
 
@@ -424,9 +706,38 @@ async def process_url_job(payload: dict, url: str):
                 success = await dispatcher.dispatch(job)
 
     except Exception as e:
-        logger.exception("Unhandled error while dispatching URL job %s", job.job_id)
+
         success = False
-        error_message = (str(e) or "Processing failed")[:300]
+        error_message = USER_SAFE_ERROR_TEXT
+
+        await _report_job_failure(
+            job,
+            "url_download",
+            stage=JobStage.PROCESSING,
+            code=ErrorCode.PROCESSING_FAILED,
+            exception=e,
+            url=url,
+            duration_seconds=time.monotonic() - started,
+        )
+
+    else:
+
+        error_message = USER_SAFE_ERROR_TEXT
+
+        if not success:
+
+            await _report_job_failure(
+                job,
+                "url_download",
+                stage=JobStage.PROCESSING,
+                code=ErrorCode.PROCESSING_FAILED,
+                exception_message=(
+                    "dispatcher returned success=False "
+                    "(see the preceding processor log lines for the reason)"
+                ),
+                url=url,
+                duration_seconds=time.monotonic() - started,
+            )
 
     await _deliver_and_cleanup(job, success, error_message)
 
@@ -437,15 +748,30 @@ async def process_multipart_job(payload: dict, part_ids: list[int]):
     actual disk-conscious download/extract/upload cycle to
     ArchiveProcessor.process_multivolume — see processors/archive.py."""
 
-    messages = await telegram_service.client.get_messages(
-        Telegram.GROUP_ID,
-        ids=part_ids,
-    )
+    started = time.monotonic()
+
+    try:
+        messages = await telegram_service.client.get_messages(
+            Telegram.GROUP_ID,
+            ids=part_ids,
+        )
+    except Exception as e:
+        await _report_payload_failure(payload, e)
+        return
 
     messages = [m for m in messages if m is not None and m.media]
 
     if len(messages) < 2:
-        logger.warning("Multipart job has too few valid parts: %s", part_ids)
+
+        # Same as the single-file "no media" case: the parts were
+        # validated by the bot at submission, so a shrunken set is a
+        # pipeline failure, not something to log-and-forget.
+        await _report_payload_failure(
+            payload,
+            RuntimeError(
+                f"multipart job has too few valid parts: {part_ids}"
+            ),
+        )
         return
 
     job = Job(
@@ -453,6 +779,8 @@ async def process_multipart_job(payload: dict, part_ids: list[int]):
         message_id=part_ids[0],
         options=_build_options(payload.get("options", {})),
     )
+
+    job.username = payload.get("username", "")
 
     job.file_type = "ARCHIVE"
 
@@ -484,7 +812,7 @@ async def process_multipart_job(payload: dict, part_ids: list[int]):
         return
 
     success = False
-    error_message = "Processing failed"
+    error_message = USER_SAFE_ERROR_TEXT
 
     try:
         # Same processing semaphore as single-file jobs — a multi-volume
@@ -492,9 +820,33 @@ async def process_multipart_job(payload: dict, part_ids: list[int]):
         async with _get_processing_semaphore():
             success = await archive_processor.process_multivolume(job, messages)
     except Exception as e:
-        logger.exception("Unhandled error while processing multipart job %s", job.job_id)
+
         success = False
-        error_message = (str(e) or "Processing failed")[:300]
+
+        await _report_job_failure(
+            job,
+            "multipart_archive",
+            stage=JobStage.PROCESSING,
+            code=ErrorCode.PROCESSING_FAILED,
+            exception=e,
+            duration_seconds=time.monotonic() - started,
+        )
+
+    else:
+
+        if not success:
+
+            await _report_job_failure(
+                job,
+                "multipart_archive",
+                stage=JobStage.PROCESSING,
+                code=ErrorCode.PROCESSING_FAILED,
+                exception_message=(
+                    "multi-volume processor returned success=False "
+                    "(see the preceding processor log lines for the reason)"
+                ),
+                duration_seconds=time.monotonic() - started,
+            )
 
     await _deliver_and_cleanup(job, success, error_message)
 
@@ -534,17 +886,44 @@ async def _deliver_and_cleanup(job, success: bool, error_message: str):
                 )
                 break
 
+        delivered = 0
+        failed_uploads: list[str] = []
+
         for entry in job.output_files:
 
             if entry.uploaded:
-                continue  # already delivered live during archive processing
+                delivered += 1  # already delivered live during archive processing
+                continue
 
-            await upload_entry(job, entry)
+            if await upload_entry(job, entry):
+                delivered += 1
+            else:
+                # upload_entry already logged the underlying exception and
+                # freed the disk — track it so the failure is visible to
+                # the user and the admins instead of silently vanishing.
+                failed_uploads.append(entry.path.name)
 
             # Small pacing delay to avoid tripping flood limits on jobs
             # that unpack into dozens/hundreds of files (e.g. archives).
             if len(job.output_files) > 5:
                 await asyncio.sleep(0.5)
+
+        if failed_uploads:
+
+            await _report_job_failure(
+                job,
+                "delivery",
+                stage=JobStage.UPLOAD,
+                code=ErrorCode.UPLOAD_FAILED,
+                exception_message=(
+                    f"{len(failed_uploads)} of {len(job.output_files)} "
+                    "output file(s) failed to upload"
+                ),
+                extra_lines=[
+                    f"failed file: {name}"
+                    for name in failed_uploads[:10]
+                ],
+            )
 
         try:
             await telegram_service.send_info(
@@ -561,16 +940,33 @@ async def _deliver_and_cleanup(job, success: bool, error_message: str):
 
     if not success or not job.has_output:
 
-        await telegram_service.send_error(
-            Protocol.create_error(
-                user_id=job.user_id,
-                job_id=job.job_id,
-                message=error_message if not job.has_output else "Some files failed to process",
-                target_chat_id=job.options.target_chat_id,
-            )
+        await _send_user_safe_error(
+            job,
+            error_message if not job.has_output else "Some files failed to process",
         )
 
-    job.cleanup()
+    elif failed_uploads and delivered == 0:
+
+        # Processing "succeeded" but not a single output made it to
+        # Telegram — without this, the user got the success flow with
+        # zero files and no explanation.
+        await _send_user_safe_error(job)
+
+    try:
+        job.cleanup()
+    except Exception as e:
+
+        # Cleanup runs at the very end of every path — a failure here
+        # (locked file, permission) must not escape into the payload
+        # dispatcher, but it also must not stay silent: it leaks disk
+        # space on a resource-constrained VPS.
+        await _report_job_failure(
+            job,
+            "cleanup",
+            stage=JobStage.CLEANUP,
+            code=ErrorCode.CLEANUP_FAILED,
+            exception=e,
+        )
 
 
 async def heartbeat_loop():
@@ -591,10 +987,15 @@ async def heartbeat_loop():
 
 
 async def _process_job_safe(payload: dict):
+    """Top-level safety net for one bridge job task. process_job now
+    reports stage failures itself; this only catches what escaped the
+    whole pipeline (and would previously vanish into the log file with
+    the user getting silence)."""
+
     try:
         await process_job(payload)
-    except Exception:
-        logger.exception("Unhandled error processing job payload: %s", payload)
+    except Exception as e:
+        await _report_payload_failure(payload, e)
 
 
 async def main():

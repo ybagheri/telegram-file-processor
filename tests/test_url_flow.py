@@ -14,6 +14,8 @@ import pytest
 
 from config import Paths, Processing, RateLimiting
 
+from core.constants import MessageType
+
 import handlers.core as core
 
 from models.pending_file import PendingFile
@@ -179,6 +181,7 @@ def _worker_stubs(monkeypatch, tmp_path):
 
     async def fake_upload_entry(job, entry):
         entry.uploaded = True
+        return True
 
     monkeypatch.setattr(worker_module.telegram_service, "send_error", fake_send_error)
     monkeypatch.setattr(worker_module.telegram_service, "send_result", fake_send_result)
@@ -245,8 +248,19 @@ async def test_process_url_job_too_large_gets_persian_error(monkeypatch, tmp_pat
         "https://example.com/huge.mp4",
     )
 
-    assert len(sent["error"]) == 1
-    assert "حد مجاز" in sent["error"][0]["message"]
+    # Two error sends now: the structured admin report (ADMIN_ERROR) and
+    # the user-facing Persian message (ERROR).
+    assert len(sent["error"]) == 2
+
+    admin_report, user_error = sent["error"]
+
+    assert admin_report["type"] == MessageType.ADMIN_ERROR.value
+    assert admin_report["user_id"] == 555
+    assert "DOWNLOAD" in admin_report["report"]
+    assert "DOWNLOAD_FAILED" in admin_report["report"]
+
+    assert user_error["type"] == MessageType.ERROR.value
+    assert "حد مجاز" in user_error["message"]
 
 
 async def test_process_url_job_network_failure_gets_persian_error(
@@ -265,8 +279,15 @@ async def test_process_url_job_network_failure_gets_persian_error(
         "https://example.com/gone.mp4",
     )
 
-    assert len(sent["error"]) == 1
-    assert "دانلود فایل از لینک ناموفق بود" in sent["error"][0]["message"]
+    assert len(sent["error"]) == 2
+
+    admin_report, user_error = sent["error"]
+
+    assert admin_report["type"] == MessageType.ADMIN_ERROR.value
+    assert "DOWNLOAD" in admin_report["report"]
+
+    assert user_error["type"] == MessageType.ERROR.value
+    assert "دانلود فایل از لینک ناموفق بود" in user_error["message"]
 
 
 async def test_process_url_job_timeout_gets_persian_error(monkeypatch, tmp_path):
@@ -283,8 +304,9 @@ async def test_process_url_job_timeout_gets_persian_error(monkeypatch, tmp_path)
         "https://example.com/slow.mp4",
     )
 
-    assert len(sent["error"]) == 1
-    assert "طول کشید" in sent["error"][0]["message"]
+    assert len(sent["error"]) == 2
+    assert sent["error"][0]["type"] == MessageType.ADMIN_ERROR.value
+    assert "طول کشید" in sent["error"][1]["message"]
 
 
 async def test_process_url_job_never_touches_bridge_messages(monkeypatch, tmp_path):

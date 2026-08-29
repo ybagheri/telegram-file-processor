@@ -332,5 +332,3 @@ def build_admin_report(
         report = report[: ErrorReporting.MAX_REPORT_CHARS - 1] + "…"
 
     return report
-
-    return safe

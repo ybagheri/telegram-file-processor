@@ -230,6 +230,22 @@ async def url_mode_pick(callback: CallbackQuery):
         await callback.answer()
 
 
+def _submitter_display_name(pending: PendingFile) -> str:
+    """Username (or full name) of whoever submitted this file, for the
+    worker's admin failure reports — the worker only sees user ids."""
+
+    user = getattr(pending.source_message, "from_user", None)
+
+    if user is None:
+        return ""
+
+    return (
+        getattr(user, "username", None)
+        or getattr(user, "full_name", None)
+        or ""
+    )
+
+
 async def finalize_job(callback: CallbackQuery, pending: PendingFile, pid: str):
 
     if pending.url:
@@ -247,6 +263,7 @@ async def finalize_job(callback: CallbackQuery, pending: PendingFile, pid: str):
             "original_chat_id": pending.chat_id,
             "options": pending.options,
             "account_tier": get_account_tier(pending.user_id).value,
+            "username": _submitter_display_name(pending),
         }
 
         if pending.direct_upload:
@@ -264,6 +281,7 @@ async def finalize_job(callback: CallbackQuery, pending: PendingFile, pid: str):
             "original_chat_id": pending.chat_id,
             "options": pending.options,
             "account_tier": get_account_tier(pending.user_id).value,
+            "username": _submitter_display_name(pending),
         }
 
     else:
@@ -279,6 +297,7 @@ async def finalize_job(callback: CallbackQuery, pending: PendingFile, pid: str):
             "original_chat_id": pending.chat_id,
             "options": pending.options,
             "account_tier": get_account_tier(pending.user_id).value,
+            "username": _submitter_display_name(pending),
         }
 
     await telegram_service.send_job(job_data)

@@ -373,8 +373,13 @@ async def test_unauthorized_user_sending_a_file_directly_still_notifies_admins(a
         assert "@brandnew_user" in note.text
         assert str(new_user_id) in note.text
 
+    # Trial users are no longer hard-blocked (see handlers/core.py's
+    # "no hard access gate" note): the reply is the normal per-file flow,
+    # not an access-denied message — but the admin STILL gets notified
+    # about the new pending user, which is what this test guards.
     assert len(user_replies) == 1
-    assert "اجازه" in user_replies[0].text
+    assert "اجازه" not in user_replies[0].text
+    assert "کیفیت" in user_replies[0].text
 
     info = pending_user_store.get(new_user_id)
     assert info is not None, "user must be tracked as pending even though they never sent /start"

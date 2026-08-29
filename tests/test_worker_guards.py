@@ -119,8 +119,18 @@ async def test_process_job_allows_file_exactly_at_the_limit(
         {"user_id": 42, "message_id": 1, "options": {}}
     )
 
-    assert len(stub_telegram) == 1
-    assert "حد مجاز" not in stub_telegram[0]["message"]
+    # Two sends: the admin gets the structured DOWNLOAD-stage report and
+    # the user gets the safe generic error line (no size-guard text — the
+    # file was exactly at the limit, so the guard never fired).
+    assert len(stub_telegram) == 2
+
+    admin_report, user_error = stub_telegram
+
+    assert admin_report["type"] == MessageType.ADMIN_ERROR.value
+    assert "DOWNLOAD" in admin_report["report"]
+
+    assert user_error["type"] == MessageType.ERROR.value
+    assert "حد مجاز" not in user_error["message"]
 
 
 async def test_process_multipart_job_rejects_oversized_total_before_download(
@@ -238,5 +248,14 @@ async def test_small_files_skip_the_disk_check(
         {"user_id": 42, "message_id": 1, "options": {}}
     )
 
-    assert len(stub_telegram) == 1
-    assert "دیسک" not in stub_telegram[0]["message"]
+    # The download "failed" (past the guard) — one admin report plus one
+    # safe user error, and neither may be the disk-space rejection.
+    assert len(stub_telegram) == 2
+
+    admin_report, user_error = stub_telegram
+
+    assert admin_report["type"] == MessageType.ADMIN_ERROR.value
+    assert "DISK" not in admin_report["report"]
+
+    assert user_error["type"] == MessageType.ERROR.value
+    assert "دیسک" not in user_error["message"]

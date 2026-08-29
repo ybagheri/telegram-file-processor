@@ -65,6 +65,11 @@ class Job:
 
     status: str = JobStatus.PENDING
 
+    # Submitter display name (username or full name), resolved by the bot
+    # at submission time and carried through the payload — used only for
+    # admin failure reports, so the operator knows WHO hit the problem.
+    username: str = ""
+
     created_at: datetime = field(
         default_factory=datetime.utcnow
     )
