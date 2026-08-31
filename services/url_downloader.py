@@ -18,11 +18,15 @@ from pathlib import Path
 
 import socket
 
+import ssl
+
 import urllib.error
 
 import urllib.parse
 
 import urllib.request
+
+from config import Downloads
 
 from core.logger import get_logger
 
@@ -41,6 +45,8 @@ REASON_TOO_LARGE = "too_large"
 REASON_EMPTY = "empty"
 REASON_LINK_RESOLVE_FAILED = "link_resolve_failed"
 REASON_PASSWORD_PROTECTED = "password_protected"
+REASON_SSL_EXPIRED = "ssl_expired"
+REASON_SSL_ERROR = "ssl_error"
 
 
 class URLDownloadError(Exception):
@@ -80,6 +86,18 @@ def describe_download_error(reason: str, detail: str = "") -> str:
         return (
             "❌ دریافت لینک مستقیم از این صفحه ناموفق بود. لطفاً بررسی کنید "
             "لینک هنوز معتبر است یا لینک دانلود مستقیم فایل را ارسال کنید."
+        )
+
+    if reason == REASON_SSL_EXPIRED:
+        return (
+            "❌ گواهی امنیتی (SSL) سایت مقصد منقضی شده است. این مشکل از "
+            "سمت همان سایت است، نه ربات — لطفاً بعداً دوباره امتحان کنید."
+        )
+
+    if reason == REASON_SSL_ERROR:
+        return (
+            "❌ اتصال امن (SSL) به سایت مقصد برقرار نشد (گواهی آن نامعتبر "
+            "است). به‌دلایل امنیتی این دانلود انجام نشد."
         )
 
     if reason == REASON_TOO_LARGE:
@@ -236,6 +254,61 @@ def _open_url(url: str, timeout: int):
     return urllib.request.urlopen(request, timeout=timeout)
 
 
+def _open_url_insecure(url: str, timeout: int):
+    """Same request, but without certificate verification. Only ever
+    called after confirming the specific failure was an EXPIRED
+    certificate and the fallback is enabled — see
+    _open_url_allow_expired_cert()."""
+
+    context = ssl.create_default_context()
+    context.check_hostname = False
+    context.verify_mode = ssl.CERT_NONE
+
+    request = urllib.request.Request(
+        url,
+        headers=_request_headers(url),
+    )
+
+    opener = urllib.request.build_opener(
+        urllib.request.HTTPSHandler(context=context)
+    )
+
+    return opener.open(request, timeout=timeout)
+
+
+def _open_url_allow_expired_cert(url: str, timeout: int):
+    """Opens `url`, retrying once without certificate verification if —
+    and only if — the failure is specifically an EXPIRED certificate.
+    Every other verification failure (hostname mismatch, self-signed,
+    untrusted CA — signs that could mean active tampering rather than a
+    site operator forgetting to renew) is left as a hard failure
+    regardless of Downloads.ALLOW_EXPIRED_SSL_CERT_FALLBACK."""
+
+    try:
+        return _open_url(url, timeout)
+
+    except urllib.error.URLError as e:
+
+        if not isinstance(e.reason, ssl.SSLCertVerificationError):
+            raise
+
+        detail = getattr(e.reason, "verify_message", "") or str(e.reason)
+
+        if "expired" not in detail.lower():
+            raise
+
+        if not Downloads.ALLOW_EXPIRED_SSL_CERT_FALLBACK:
+            raise
+
+        logger.warning(
+            "%s has an expired TLS certificate — retrying without "
+            "certificate verification (Downloads.ALLOW_EXPIRED_SSL_CERT_FALLBACK)",
+            urllib.parse.urlsplit(url).netloc,
+        )
+
+        return _open_url_insecure(url, timeout)
+
+
 def _stale_picofile_landing_page(response) -> str | None:
     """picofile does not error when a `/d/...` direct link has expired —
     it silently redirects to the file's *landing page* instead, and a
@@ -289,7 +362,7 @@ def download_to_disk_sync(
     url = resolve_download_url(url, timeout)
 
     try:
-        response = _open_url(url, timeout)
+        response = _open_url_allow_expired_cert(url, timeout)
 
         stale_landing_page = _stale_picofile_landing_page(response)
 
@@ -316,7 +389,7 @@ def download_to_disk_sync(
             )
 
             url = fresh_url
-            response = _open_url(url, timeout)
+            response = _open_url_allow_expired_cert(url, timeout)
 
             if _stale_picofile_landing_page(response):
                 response.close()
@@ -338,6 +411,18 @@ def download_to_disk_sync(
                 REASON_TIMEOUT,
                 "connection timed out",
             ) from e
+
+        if isinstance(e.reason, ssl.SSLCertVerificationError):
+
+            detail = getattr(e.reason, "verify_message", "") or str(e.reason)
+
+            reason = (
+                REASON_SSL_EXPIRED
+                if "expired" in detail.lower()
+                else REASON_SSL_ERROR
+            )
+
+            raise URLDownloadError(reason, detail) from e
 
         raise URLDownloadError(
             REASON_NETWORK,

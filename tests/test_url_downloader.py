@@ -547,3 +547,118 @@ def test_broken_progress_callback_does_not_break_the_download(fake_urlopen, tmp_
 
     assert result == destination
     assert destination.read_bytes() == b"hello world"
+
+# ======================================================================
+# Expired-TLS-certificate fallback (services/url_downloader.py::
+# _open_url_allow_expired_cert) — narrowly scoped to *expired* certs
+# only, never other verification failures.
+# ======================================================================
+
+
+def _expired_cert_error(url="https://example.com/f"):
+
+    import ssl as ssl_module
+
+    reason = ssl_module.SSLCertVerificationError()
+    reason.verify_message = "certificate has expired"
+
+    return url_downloader.urllib.error.URLError(reason)
+
+
+def _hostname_mismatch_error(url="https://example.com/f"):
+
+    import ssl as ssl_module
+
+    reason = ssl_module.SSLCertVerificationError()
+    reason.verify_message = "Hostname mismatch, certificate is not valid for 'example.com'."
+
+    return url_downloader.urllib.error.URLError(reason)
+
+
+def test_expired_cert_falls_back_to_insecure_retry_when_enabled(monkeypatch, tmp_path):
+
+    monkeypatch.setattr(url_downloader.Downloads, "ALLOW_EXPIRED_SSL_CERT_FALLBACK", True)
+
+    calls = {"secure": 0, "insecure": 0}
+
+    def _secure_urlopen(request, timeout=None):
+        calls["secure"] += 1
+        raise _expired_cert_error()
+
+    class _FakeOpener:
+        def open(self, request, timeout=None):
+            calls["insecure"] += 1
+            return FakeResponse([b"the file bytes"], {"Content-Length": "14"})
+
+    def _fake_build_opener(*handlers):
+        return _FakeOpener()
+
+    monkeypatch.setattr(url_downloader.urllib.request, "urlopen", _secure_urlopen)
+    monkeypatch.setattr(url_downloader.urllib.request, "build_opener", _fake_build_opener)
+
+    destination = tmp_path / "f"
+
+    result = download_to_disk_sync("https://example.com/f", destination, 1000)
+
+    assert result == destination
+    assert destination.read_bytes() == b"the file bytes"
+    assert calls == {"secure": 1, "insecure": 1}
+
+
+def test_expired_cert_fallback_disabled_raises_ssl_expired(monkeypatch, tmp_path):
+
+    monkeypatch.setattr(url_downloader.Downloads, "ALLOW_EXPIRED_SSL_CERT_FALLBACK", False)
+
+    build_opener_calls = []
+
+    def _secure_urlopen(request, timeout=None):
+        raise _expired_cert_error()
+
+    def _fake_build_opener(*handlers):
+        build_opener_calls.append(handlers)
+        raise AssertionError("must not attempt an insecure retry when disabled")
+
+    monkeypatch.setattr(url_downloader.urllib.request, "urlopen", _secure_urlopen)
+    monkeypatch.setattr(url_downloader.urllib.request, "build_opener", _fake_build_opener)
+
+    with pytest.raises(URLDownloadError) as exc_info:
+        download_to_disk_sync("https://example.com/f", tmp_path / "f", 1000)
+
+    assert exc_info.value.reason == url_downloader.REASON_SSL_EXPIRED
+    assert build_opener_calls == []
+
+
+def test_non_expired_cert_error_never_falls_back(monkeypatch, tmp_path):
+    """A hostname mismatch (or any non-'expired' verification failure)
+    could mean active tampering, not just a lapsed renewal — this must
+    stay a hard failure even with the fallback enabled."""
+
+    monkeypatch.setattr(url_downloader.Downloads, "ALLOW_EXPIRED_SSL_CERT_FALLBACK", True)
+
+    build_opener_calls = []
+
+    def _secure_urlopen(request, timeout=None):
+        raise _hostname_mismatch_error()
+
+    def _fake_build_opener(*handlers):
+        build_opener_calls.append(handlers)
+        raise AssertionError("must never retry insecurely for a non-expired cert error")
+
+    monkeypatch.setattr(url_downloader.urllib.request, "urlopen", _secure_urlopen)
+    monkeypatch.setattr(url_downloader.urllib.request, "build_opener", _fake_build_opener)
+
+    with pytest.raises(URLDownloadError) as exc_info:
+        download_to_disk_sync("https://example.com/f", tmp_path / "f", 1000)
+
+    assert exc_info.value.reason == url_downloader.REASON_SSL_ERROR
+    assert build_opener_calls == []
+
+
+def test_expired_cert_error_message_is_persian_and_distinguishable():
+
+    expired_text = url_downloader.describe_download_error(url_downloader.REASON_SSL_EXPIRED)
+    other_ssl_text = url_downloader.describe_download_error(url_downloader.REASON_SSL_ERROR)
+    network_text = url_downloader.describe_download_error(url_downloader.REASON_NETWORK)
+
+    assert expired_text != other_ssl_text != network_text
+    assert "SSL" in expired_text

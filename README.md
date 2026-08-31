@@ -86,6 +86,7 @@ Check status/logs with `systemctl status telegram-bot` / `journalctl -u telegram
 | `PROGRESS_ENABLED` | *(optional)* Whether the worker shows a live download/processing/upload progress message for each job (default: `true`). Set to `false` to restore the old silent behavior |
 | `PROGRESS_UPDATE_INTERVAL_SECONDS` | *(optional)* Minimum time between edits of a job's progress message, in seconds (default: `2.5`) |
 | `PROGRESS_BAR_LENGTH` | *(optional)* Number of ●/○ segments in the progress bar (default: `10`) |
+| `ALLOW_EXPIRED_SSL_CERT_FALLBACK` | *(optional)* For URL downloads, whether to retry once without certificate verification when a site's TLS certificate has specifically **expired** (default: `true`). Never applies to other verification failures (hostname mismatch, self-signed, untrusted CA) — those stay hard failures regardless |
 
 When `ADMIN_IDS` is set, an admin gets `/admin` — a panel to add a user (choosing how long their access lasts: 1 week / 3 months / 6 months / 1 year / unlimited), renew/change someone's expiry later, or enable/disable a user without losing their record. Users can be identified either by forwarding one of their messages or by typing their numeric id directly (in which case the admin can optionally attach a name/username by hand). This data lives in a small SQLite database (`config_data/access.db`), not a plain file.
 

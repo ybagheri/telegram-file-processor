@@ -287,6 +287,28 @@ class Processing:
     }
 
 
+class Downloads:
+
+    # Some small/personal file hosts let their TLS certificate lapse
+    # without taking the site down — the content is still served fine,
+    # only the certificate's expiry date is wrong. When enabled (the
+    # default), a URL download that fails *specifically* because the
+    # target's certificate has expired is retried once without
+    # certificate verification. This is deliberately narrow: any other
+    # verification failure (hostname mismatch, self-signed, untrusted
+    # CA — signs that could mean active tampering rather than an
+    # operator forgetting to renew) is never auto-retried, regardless
+    # of this setting. See CLAUDE.md's change log for the report this
+    # came from.
+    ALLOW_EXPIRED_SSL_CERT_FALLBACK = (
+        os.getenv(
+            "ALLOW_EXPIRED_SSL_CERT_FALLBACK",
+            "true",
+        ).lower()
+        == "true"
+    )
+
+
 class Progress:
 
     # Master on/off switch for the download/processing/upload progress
