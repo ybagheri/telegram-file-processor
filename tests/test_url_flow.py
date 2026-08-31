@@ -128,11 +128,78 @@ async def test_unknown_file_type_url_is_rejected(monkeypatch, clean_url_state):
 
     monkeypatch.setattr(core, "validate_url", lambda url: (True, "ok"))
 
+    # Not a host resolve_download_url knows about, so it's a no-op —
+    # the URL's own extension is the only signal, and there isn't one.
+    monkeypatch.setattr(core, "resolve_download_url", lambda url, timeout: url)
+
     message, answers = _fake_url_message("https://example.com/thing.exe")
 
     await core.handle_url_submission(message, "https://example.com/thing.exe")
 
     assert "تشخیص" in answers[0][0]
+    assert shared_state.pending_files == {}
+
+
+async def test_picofile_landing_page_url_is_resolved_before_type_detection(
+    monkeypatch, clean_url_state
+):
+    """The bug this covers: a picofile landing page URL
+    (".../file/123/movie.zip.html") has no recognisable extension on its
+    own, so without resolving it first this used to be rejected outright
+    as an unsupported/undetectable file type before a job ever existed."""
+
+    monkeypatch.setattr(core, "validate_url", lambda url: (True, "ok"))
+    monkeypatch.setattr(core.settings_store, "get", lambda user_id: dict(DEFAULTS))
+
+    page_url = "https://s8.picofile.com/file/8365509176/movie.zip.html"
+    direct_url = "https://s8.picofile.com/d/8365509176/abcd-1234/movie.zip"
+
+    resolve_calls = []
+
+    def fake_resolve(url, timeout):
+        resolve_calls.append(url)
+        return direct_url
+
+    monkeypatch.setattr(core, "resolve_download_url", fake_resolve)
+
+    message, answers = _fake_url_message(page_url)
+
+    await core.handle_url_submission(message, page_url)
+
+    assert resolve_calls == [page_url]
+    assert len(shared_state.pending_files) == 1
+
+    pending = next(iter(shared_state.pending_files.values()))
+
+    # The ORIGINAL url is what's stored — the worker resolves again,
+    # freshly, right before the actual download (see worker.py and
+    # CLAUDE.md's change log for why: a picofile direct link is
+    # short-lived and the user may sit on the options screen a while).
+    assert pending.url == page_url
+    assert pending.file_name == "movie.zip"
+    assert pending.file_type == "ARCHIVE"
+
+    assert "ارسال مستقیم" in answers[0][0]
+
+
+async def test_url_submission_shows_a_persian_error_when_resolving_fails(
+    monkeypatch, clean_url_state
+):
+
+    monkeypatch.setattr(core, "validate_url", lambda url: (True, "ok"))
+
+    page_url = "https://s8.picofile.com/file/8365509176/movie.zip.html"
+
+    def fake_resolve(url, timeout):
+        raise URLDownloadError("password_protected", "requires a password")
+
+    monkeypatch.setattr(core, "resolve_download_url", fake_resolve)
+
+    message, answers = _fake_url_message(page_url)
+
+    await core.handle_url_submission(message, page_url)
+
+    assert "رمز" in answers[0][0]
     assert shared_state.pending_files == {}
 
 
@@ -232,6 +299,60 @@ async def test_process_url_job_happy_path(monkeypatch, tmp_path):
     assert job.original_name == "lesson1.mp4"
     assert job.file_size == len(b"fake video bytes")
     assert len(sent["result"]) == 1  # delivered through the shared pipeline
+
+
+async def test_process_url_job_resolves_the_url_before_naming_the_file(monkeypatch, tmp_path):
+    """The picofile.com case: the URL handed to the bot is a landing
+    *page* (".../file/123/movie.zip.html"); resolve_download_url() turns
+    it into the real direct link, and the filename/type must be derived
+    from THAT, not the original page URL — see worker.py::process_url_job
+    and services/url_downloader.py::resolve_download_url."""
+
+    sent = _worker_stubs(monkeypatch, tmp_path)
+
+    page_url = "https://s8.picofile.com/file/8365509176/movie.zip.html"
+    direct_url = "https://s8.picofile.com/d/8365509176/abcd-1234/movie.zip"
+
+    resolve_calls = []
+
+    def fake_resolve(url, timeout):
+        resolve_calls.append(url)
+        return direct_url
+
+    monkeypatch.setattr(worker_module, "resolve_download_url", fake_resolve)
+
+    downloaded = []
+
+    async def fake_download_to_disk(url, destination, max_size, **kwargs):
+        downloaded.append(url)
+        destination.parent.mkdir(parents=True, exist_ok=True)
+        destination.write_bytes(b"the real zip bytes")
+        return destination
+
+    monkeypatch.setattr(worker_module, "download_to_disk", fake_download_to_disk)
+
+    dispatched = []
+
+    async def fake_dispatch(job):
+        dispatched.append(job)
+        job.add_output(job.input_file)
+        return True
+
+    monkeypatch.setattr(worker_module.dispatcher, "dispatch", fake_dispatch)
+
+    await worker_module.process_url_job(
+        {"user_id": 555, "url": page_url, "options": {}},
+        page_url,
+    )
+
+    assert resolve_calls == [page_url]
+    assert downloaded == [direct_url]
+
+    job = dispatched[0]
+
+    assert job.original_name == "movie.zip"
+    assert job.file_type == "ARCHIVE"
+    assert len(sent["result"]) == 1
 
 
 async def test_process_url_job_too_large_gets_persian_error(monkeypatch, tmp_path):

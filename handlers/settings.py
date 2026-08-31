@@ -102,8 +102,12 @@ async def settings_sort_order(callback: CallbackQuery):
 async def settings_exclude(callback: CallbackQuery):
     awaiting_state[callback.from_user.id] = "settings_exclude"
     await callback.message.answer(
-        "متنی که می‌خواهید از نام همه‌ی فایل‌ها حذف شود را بفرستید "
-        "(مثلاً یک تبلیغ یا واترمارک متنی مثل «[www.site.com]»).\n"
+        "متن‌هایی که می‌خواهید از نام همه‌ی فایل‌ها حذف شوند را بفرستید "
+        "(مثلاً یک تبلیغ، آی‌دی یا لینک).\n"
+        "برای حذف چند مورد با هم، هرکدام را در یک خط جدا بفرستید، مثلاً:\n"
+        "@username\n"
+        "www.website.com\n"
+        "یادداشت سوم\n\n"
         "برای غیرفعال کردن این قابلیت، کلمه‌ی «حذف» را بفرستید."
     )
     await callback.answer()
@@ -167,7 +171,7 @@ async def settings_target_pick(callback: CallbackQuery):
     awaiting_state[callback.from_user.id] = "settings_target"
     await callback.message.answer(
         "یک پیام از چت مقصد برای من فوروارد کنید، @username یا آیدی عددی آن را بفرستید.\n"
-        "⚠️ ربات باید عضو آن گروه/کانال باشد.\n"
+        "⚠️ ربات باید عضو آن گروه/کانال باشد و شما باید مدیر آن باشید.\n"
         "برای انصراف /cancel را بفرستید."
     )
     await callback.answer()
@@ -219,7 +223,7 @@ async def handle_settings_awaited_input(message: Message, state: str) -> bool:
         return True
 
     if state == "settings_target":
-        chat_id, label = await resolve_target(message)
+        chat_id, label, error = await resolve_target(message)
         if chat_id is None:
             if message.document or message.video or message.audio:
                 # They clearly want to work on a new file now, not finish
@@ -227,6 +231,13 @@ async def handle_settings_awaited_input(message: Message, state: str) -> bool:
                 awaiting_state.pop(user_id, None)
                 await message.answer("⏹ تنظیم مقصد لغو شد؛ این فایل را به‌عنوان کار جدید در نظر می‌گیرم.")
                 return False
+            if error == "not_admin":
+                await message.answer(
+                    "❌ شما مدیر آن چت نیستید. فقط مدیران/سازندگان یک گروه یا "
+                    "کانال می‌توانند آن را به‌عنوان مقصد تنظیم کنند.\n"
+                    "یک پیام از چت مقصد فوروارد کنید، یا برای انصراف /cancel را بفرستید."
+                )
+                return True
             await message.answer(
                 "چت را نشناختم. یک پیام از آن فوروارد کنید، @username یا آیدی عددی چت را بفرستید.\n"
                 "برای انصراف /cancel را بفرستید."

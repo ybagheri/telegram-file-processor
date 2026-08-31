@@ -24,12 +24,19 @@ from services.url_downloader import (
 class FakeResponse:
     """Mimics the parts of a urllib response the downloader uses."""
 
-    def __init__(self, chunks: list[bytes], headers: dict | None = None):
+    def __init__(self, chunks: list[bytes], headers: dict | None = None, url: str = ""):
         self._stream = io.BytesIO(b"".join(chunks))
         self.headers = headers or {}
+        self._url = url
 
     def read(self, size: int) -> bytes:
         return self._stream.read(size)
+
+    def geturl(self) -> str:
+        return self._url
+
+    def close(self):
+        pass
 
     def __enter__(self):
         return self
@@ -221,6 +228,257 @@ def test_zero_byte_response_is_an_error_and_leaves_no_file(fake_urlopen, tmp_pat
 
     assert exc_info.value.reason == REASON_EMPTY
     assert not destination.exists()
+
+
+# ======================================================================
+# Same-origin Referer header (fixes the "get direct link" button on
+# hosts like picofile.com returning a tiny error page instead of the
+# file — see services/url_downloader.py::_request_headers)
+# ======================================================================
+
+
+def test_request_sends_a_same_origin_referer(monkeypatch, tmp_path):
+
+    captured = {}
+
+    def _urlopen(request, timeout=None):
+        captured["headers"] = dict(request.header_items())
+        return FakeResponse([b"data"], {"Content-Length": "4"})
+
+    monkeypatch.setattr(url_downloader.urllib.request, "urlopen", _urlopen)
+
+    download_to_disk_sync(
+        "https://s8.picofile.com/d/8365509176/abc/file.zip",
+        tmp_path / "f",
+        1000,
+    )
+
+    # urllib capitalizes header names as Title-Case internally.
+    assert captured["headers"]["Referer"] == "https://s8.picofile.com/"
+    assert "Mozilla" in captured["headers"]["User-agent"]
+
+
+# ======================================================================
+# picofile.com landing-page -> direct-link resolution
+# (services/url_downloader.py::resolve_download_url)
+# ======================================================================
+
+
+PICOFILE_PAGE_URL = (
+    "https://s8.picofile.com/file/8365509176/"
+    "Saison_1_livre_audio_www_iranfrench_ir_.zip.html"
+)
+
+PICOFILE_DIRECT_URL = (
+    "https://s8.picofile.com/d/8365509176/"
+    "399d0c56-ce42-4a9c-9044-142792f5c623/"
+    "Saison_1_livre_audio_www_iranfrench_ir_.zip"
+)
+
+
+def test_resolve_leaves_non_picofile_urls_unchanged():
+
+    url = "https://example.com/some/file.zip"
+
+    assert url_downloader.resolve_download_url(url, timeout=10) == url
+
+
+def test_resolve_leaves_an_already_direct_picofile_link_unchanged():
+
+    # /d/... links (what the "دریافت لینک دانلود" button itself produces)
+    # don't match the /file/{id}/... landing-page pattern, so no extra
+    # request should be made for them.
+    assert (
+        url_downloader.resolve_download_url(PICOFILE_DIRECT_URL, timeout=10)
+        == PICOFILE_DIRECT_URL
+    )
+
+
+def test_resolve_picofile_landing_page_posts_to_generate_download_link(monkeypatch):
+
+    captured = {}
+
+    def _urlopen(request, timeout=None):
+        captured["url"] = request.full_url
+        captured["method"] = request.get_method()
+        captured["data"] = request.data
+        captured["headers"] = dict(request.header_items())
+        return FakeResponse([PICOFILE_DIRECT_URL.encode()])
+
+    monkeypatch.setattr(url_downloader.urllib.request, "urlopen", _urlopen)
+
+    resolved = url_downloader.resolve_download_url(PICOFILE_PAGE_URL, timeout=10)
+
+    assert resolved == PICOFILE_DIRECT_URL
+    assert captured["method"] == "POST"
+    assert (
+        captured["url"]
+        == "https://s8.picofile.com/file/generateDownloadLink?fileId=8365509176"
+    )
+    assert captured["data"] == b"password="
+    assert captured["headers"]["Referer"] == "https://s8.picofile.com/"
+
+
+def test_resolve_picofile_raises_password_protected_on_403(monkeypatch):
+
+    import urllib.error
+
+    def _urlopen(request, timeout=None):
+        raise urllib.error.HTTPError(request.full_url, 403, "Forbidden", None, None)
+
+    monkeypatch.setattr(url_downloader.urllib.request, "urlopen", _urlopen)
+
+    with pytest.raises(URLDownloadError) as exc_info:
+        url_downloader.resolve_download_url(PICOFILE_PAGE_URL, timeout=10)
+
+    assert exc_info.value.reason == url_downloader.REASON_PASSWORD_PROTECTED
+
+
+def test_resolve_picofile_raises_resolve_failed_on_other_http_errors(monkeypatch):
+
+    import urllib.error
+
+    def _urlopen(request, timeout=None):
+        raise urllib.error.HTTPError(request.full_url, 404, "Not Found", None, None)
+
+    monkeypatch.setattr(url_downloader.urllib.request, "urlopen", _urlopen)
+
+    with pytest.raises(URLDownloadError) as exc_info:
+        url_downloader.resolve_download_url(PICOFILE_PAGE_URL, timeout=10)
+
+    assert exc_info.value.reason == url_downloader.REASON_LINK_RESOLVE_FAILED
+
+
+def test_resolve_picofile_raises_resolve_failed_on_unexpected_response_body(monkeypatch):
+
+    def _urlopen(request, timeout=None):
+        return FakeResponse([b"<html>error page</html>"])
+
+    monkeypatch.setattr(url_downloader.urllib.request, "urlopen", _urlopen)
+
+    with pytest.raises(URLDownloadError) as exc_info:
+        url_downloader.resolve_download_url(PICOFILE_PAGE_URL, timeout=10)
+
+    assert exc_info.value.reason == url_downloader.REASON_LINK_RESOLVE_FAILED
+
+
+def test_download_to_disk_sync_resolves_a_picofile_page_end_to_end(monkeypatch, tmp_path):
+    """The full flow a user actually triggers: hand the bot the landing
+    page URL, get the real file — resolve step and download step chained
+    through a single download_to_disk_sync() call."""
+
+    calls = []
+
+    def _urlopen(request, timeout=None):
+        calls.append(request.full_url)
+
+        if request.full_url == PICOFILE_DIRECT_URL:
+            return FakeResponse(
+                [b"the actual file bytes"],
+                {"Content-Length": "22"},
+                url=PICOFILE_DIRECT_URL,
+            )
+
+        return FakeResponse([PICOFILE_DIRECT_URL.encode()])
+
+    monkeypatch.setattr(url_downloader.urllib.request, "urlopen", _urlopen)
+
+    destination = tmp_path / "f.zip"
+
+    result = download_to_disk_sync(PICOFILE_PAGE_URL, destination, 1000)
+
+    assert result == destination
+    assert destination.read_bytes() == b"the actual file bytes"
+    assert calls[0].startswith("https://s8.picofile.com/file/generateDownloadLink")
+    assert calls[1] == PICOFILE_DIRECT_URL
+
+
+# ======================================================================
+# Self-healing on an expired picofile direct link: instead of an HTTP
+# error, picofile redirects a dead `/d/...` link to the file's landing
+# page — a plain downloader would silently save that HTML as "the file".
+# ======================================================================
+
+
+def test_expired_direct_link_is_refreshed_and_retried(monkeypatch, tmp_path):
+
+    calls = []
+
+    def _urlopen(request, timeout=None):
+        calls.append(request.full_url)
+
+        if request.get_method() == "POST":
+            # The refresh request (generateDownloadLink).
+            return FakeResponse([PICOFILE_DIRECT_URL.encode()])
+
+        if request.full_url == PICOFILE_DIRECT_URL and len(calls) == 1:
+            # First attempt at the (stale) direct link the caller gave
+            # us: picofile silently redirects to the landing page.
+            return FakeResponse([b"<html>landing page</html>"], url=PICOFILE_PAGE_URL)
+
+        # Second attempt, using the freshly resolved link: the real file.
+        return FakeResponse(
+            [b"the actual file bytes"],
+            {"Content-Length": "22"},
+            url=PICOFILE_DIRECT_URL,
+        )
+
+    monkeypatch.setattr(url_downloader.urllib.request, "urlopen", _urlopen)
+
+    destination = tmp_path / "f.zip"
+
+    result = download_to_disk_sync(PICOFILE_DIRECT_URL, destination, 1000)
+
+    assert result == destination
+    assert destination.read_bytes() == b"the actual file bytes"
+
+    # attempt 1 (stale link, gets redirected) -> refresh POST -> attempt 2.
+    assert calls[0] == PICOFILE_DIRECT_URL
+    assert calls[2] == PICOFILE_DIRECT_URL
+
+
+def test_stuck_stale_link_raises_a_clear_error_instead_of_saving_html(monkeypatch, tmp_path):
+    """If picofile keeps redirecting to the landing page even after one
+    refresh, fail loudly rather than silently writing HTML to disk."""
+
+    def _urlopen(request, timeout=None):
+
+        if request.get_method() == "POST":
+            return FakeResponse([PICOFILE_DIRECT_URL.encode()])
+
+        return FakeResponse([b"<html>still the landing page</html>"], url=PICOFILE_PAGE_URL)
+
+    monkeypatch.setattr(url_downloader.urllib.request, "urlopen", _urlopen)
+
+    destination = tmp_path / "f.zip"
+
+    with pytest.raises(URLDownloadError) as exc_info:
+        download_to_disk_sync(PICOFILE_DIRECT_URL, destination, 1000)
+
+    assert exc_info.value.reason == url_downloader.REASON_LINK_RESOLVE_FAILED
+    assert not destination.exists()
+
+
+def test_stale_link_detection_ignores_non_picofile_redirects(monkeypatch, tmp_path):
+    """The stale-link check is scoped to picofile — an ordinary redirect
+    on any other host (or even a picofile URL that isn't the landing
+    page pattern) must not trigger a refresh attempt."""
+
+    def _urlopen(request, timeout=None):
+        return FakeResponse(
+            [b"perfectly normal file bytes"],
+            {"Content-Length": "28"},
+            url="https://cdn.example.com/final/path/file.zip",
+        )
+
+    monkeypatch.setattr(url_downloader.urllib.request, "urlopen", _urlopen)
+
+    destination = tmp_path / "f.zip"
+
+    result = download_to_disk_sync("https://example.com/redirects/here", destination, 1000)
+
+    assert result == destination
+    assert destination.read_bytes() == b"perfectly normal file bytes"
 
 
 # ======================================================================

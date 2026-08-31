@@ -176,7 +176,7 @@ async def target_pick(callback: CallbackQuery):
         awaiting_state[pending.user_id] = f"file:{pid}:target"
         await callback.message.answer(
             "یک پیام از گروه/کانال مقصد برای من فوروارد کنید، @username یا آیدی عددی آن را بفرستید.\n"
-            "⚠️ ربات باید عضو آن گروه/کانال (و دسترسی ارسال) داشته باشد.\n"
+            "⚠️ ربات باید عضو آن گروه/کانال (و دسترسی ارسال) داشته باشد و شما باید مدیر آن باشید.\n"
             "برای انصراف /cancel را بفرستید."
         )
         await callback.answer()
@@ -388,12 +388,19 @@ async def handle_file_awaited_input(message: Message, state: str) -> bool:
         return True
 
     if field_name == "target":
-        chat_id, label = await resolve_target(message)
+        chat_id, label, error = await resolve_target(message)
         if chat_id is None:
             if message.document or message.video or message.audio:
                 awaiting_state.pop(user_id, None)
                 await message.answer("⏹ تنظیم مقصد لغو شد؛ این فایل را به‌عنوان کار جدید در نظر می‌گیرم.")
                 return False
+            if error == "not_admin":
+                await message.answer(
+                    "❌ شما مدیر آن چت نیستید. فقط مدیران/سازندگان یک گروه یا "
+                    "کانال می‌توانند آن را به‌عنوان مقصد تنظیم کنند.\n"
+                    "یک پیام از چت مقصد فوروارد کنید، یا برای انصراف /cancel را بفرستید."
+                )
+                return True
             await message.answer(
                 "چت را نشناختم. یک پیام از آن فوروارد کنید، @username یا آیدی عددی چت را بفرستید.\n"
                 "برای انصراف /cancel را بفرستید."

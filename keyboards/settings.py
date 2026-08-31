@@ -7,6 +7,7 @@ from aiogram.types import InlineKeyboardButton, InlineKeyboardMarkup
 
 from keyboards.constants import POSITION_GRID, POSITION_ICONS, POSITION_LABELS_FA
 from services.settings_store import settings_store
+from utils.text import summarize_exclude
 
 
 def logo_position_keyboard(current: str) -> InlineKeyboardMarkup:
@@ -36,7 +37,7 @@ def settings_text_and_keyboard(user_id: int) -> dict:
         f"📝 کپشن پیش‌فرض مدیاها: {s['media_caption'] or '— (بدون کپشن)'}\n"
         f"🔤 ترتیب فایل‌های آرشیو: {'بر اساس تاریخ' if s['sort_mode'] == 'date' else 'بر اساس نام'} "
         f"({'نزولی' if s['sort_order'] == 'desc' else 'صعودی'})\n"
-        f"🧹 متن حذفی از نام فایل‌ها: {s['exclude_text'] or '— (خالی)'}\n"
+        f"🧹 متن حذفی از نام فایل‌ها: {summarize_exclude(s['exclude_text']) or '— (خالی)'}\n"
     )
 
     kb = InlineKeyboardMarkup(inline_keyboard=[

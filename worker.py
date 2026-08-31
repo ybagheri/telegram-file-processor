@@ -28,12 +28,12 @@ from services.media import media_service
 from services.progress import ProgressReporter
 from services.telegram import telegram_service
 from services.url_downloader import (
-    REASON_EMPTY,
-    REASON_NETWORK,
-    REASON_TIMEOUT,
+    DEFAULT_TIMEOUT_SECONDS,
     REASON_TOO_LARGE,
     URLDownloadError,
+    describe_download_error,
     download_to_disk,
+    resolve_download_url,
 )
 from utils.filetype import FileTypeDetector
 from utils.permissions import get_tier_from_payload, max_file_size_for_tier
@@ -631,20 +631,16 @@ async def process_job(payload: dict):
 
 def _url_download_error_text(reason: str, detail: str = "") -> str:
     """Persian feedback for a failed URL download, mapped from the
-    REASON_* tokens of services/url_downloader.py."""
+    REASON_* tokens of services/url_downloader.py. Delegates to
+    describe_download_error() for everything except REASON_TOO_LARGE,
+    where only the worker knows the user's actual tier limit."""
 
     if reason == REASON_TOO_LARGE:
         return _file_too_large_message(int(detail)) if detail.isdigit() else (
             "حجم فایل در لینک بیشتر از حد مجاز است."
         )
 
-    if reason == REASON_TIMEOUT:
-        return "❌ دانلود فایل بیش از حد طول کشید و متوقف شد. لطفاً دوباره تلاش کنید."
-
-    if reason == REASON_EMPTY:
-        return "❌ فایل دریافتی از لینک خالی بود."
-
-    return "❌ دانلود فایل از لینک ناموفق بود. لطفاً لینک را بررسی کنید."
+    return describe_download_error(reason, detail)
 
 
 async def process_url_job(payload: dict, url: str):
@@ -667,22 +663,36 @@ async def process_url_job(payload: dict, url: str):
 
     await _start_progress(job)
 
-    filename = payload.get("file_name") or filename_from_url(url)
-
-    job.original_name = strip_excluded(filename, job.options.exclude_text)
-
-    job.file_type = payload.get("file_type") or FileTypeDetector.detect(
-        "",
-        filename,
-    )
-
     # Tier-aware caps for URL jobs too — a link must not be a way around
     # the user's account limits.
     size_limit = _size_limit_for_payload(payload)
 
-    input_path = job.input_dir / filename
-
     try:
+        # Some hosts (picofile.com, for now) hand out a landing *page*
+        # rather than a direct link — resolved here, before the filename
+        # is derived from the URL, so a page URL like
+        # ".../file/123/movie.zip.html" doesn't get mistaken for a
+        # ".zip.html" file. download_to_disk() below re-resolves too
+        # (cheap/idempotent — see services/url_downloader.py), so this
+        # is purely about getting the filename right, not a second
+        # source of truth.
+        url = await asyncio.to_thread(
+            resolve_download_url,
+            url,
+            DEFAULT_TIMEOUT_SECONDS,
+        )
+
+        filename = payload.get("file_name") or filename_from_url(url)
+
+        job.original_name = strip_excluded(filename, job.options.exclude_text)
+
+        job.file_type = payload.get("file_type") or FileTypeDetector.detect(
+            "",
+            filename,
+        )
+
+        input_path = job.input_dir / filename
+
         job.input_file = await download_to_disk(
             url,
             input_path,

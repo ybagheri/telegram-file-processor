@@ -18,6 +18,8 @@ every time, regardless of when `dp.include_router(...)` was called.
 """
 from uuid import uuid4
 
+import asyncio
+
 import time
 
 from aiogram import F, Router
@@ -33,6 +35,12 @@ from keyboards.files import options_keyboard, quality_keyboard, url_mode_keyboar
 from models.pending_file import PendingFile
 from services.settings_store import settings_store
 from services.telegram import telegram_service
+from services.url_downloader import (
+    DEFAULT_TIMEOUT_SECONDS,
+    URLDownloadError,
+    describe_download_error,
+    resolve_download_url,
+)
 from state import admin_flow, awaiting_state, pending_files, pending_passwords, user_submission_times
 from utils.access_control import track_pending_user_if_needed
 from utils.filetype import FileTypeDetector
@@ -162,6 +170,33 @@ async def handle_url_submission(message: Message, url: str) -> None:
     filename = filename_from_url(url)
 
     file_type = FileTypeDetector.detect("", filename)
+
+    if file_type == "UNKNOWN":
+
+        # Some hosts (picofile.com, for now — see
+        # services/url_downloader.py) hand out a landing *page* URL
+        # rather than a direct link, so the extension in the raw URL
+        # (".html") doesn't say anything about the actual file. Resolve
+        # it once, purely to find the real filename/type for this
+        # options screen — the worker resolves again right before the
+        # actual download (services/url_downloader.py's own
+        # resolve_download_url call is cheap/idempotent for an
+        # already-direct link), since the user may sit on this screen
+        # for a while before confirming and a picofile direct link is
+        # short-lived.
+        try:
+            resolved_url = await asyncio.to_thread(
+                resolve_download_url,
+                url,
+                DEFAULT_TIMEOUT_SECONDS,
+            )
+        except URLDownloadError as e:
+            await message.answer(describe_download_error(e.reason, e.detail))
+            return
+
+        if resolved_url != url:
+            filename = filename_from_url(resolved_url)
+            file_type = FileTypeDetector.detect("", filename)
 
     if file_type == "UNKNOWN":
         await message.answer(
