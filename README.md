@@ -87,6 +87,11 @@ Check status/logs with `systemctl status telegram-bot` / `journalctl -u telegram
 | `PROGRESS_UPDATE_INTERVAL_SECONDS` | *(optional)* Minimum time between edits of a job's progress message, in seconds (default: `2.5`) |
 | `PROGRESS_BAR_LENGTH` | *(optional)* Number of ●/○ segments in the progress bar (default: `10`) |
 | `ALLOW_EXPIRED_SSL_CERT_FALLBACK` | *(optional)* For URL downloads, whether to retry once without certificate verification when a site's TLS certificate has specifically **expired** (default: `true`). Never applies to other verification failures (hostname mismatch, self-signed, untrusted CA) — those stay hard failures regardless |
+| `MAX_CONCURRENT_JOBS_TOTAL` | *(optional)* Global cap on jobs actually in flight (download + processing + upload) at once, across every user (default: `8`). Jobs beyond this queue silently, in submission order — they are not rejected |
+| `MAX_ACTIVE_JOBS_PER_USER_TRIAL` | *(optional)* Max jobs a trial-tier user can have running at once; a new one beyond this is rejected immediately with a clear message rather than queued (default: `2`). `0` disables this check |
+| `MAX_ACTIVE_JOBS_PER_USER_PAID` | *(optional)* Same, for paid-tier users (default: `6`) |
+| `DUPLICATE_SUBMISSION_WINDOW_MINUTES` | *(optional)* How long a just-confirmed submission is remembered for duplicate detection — resending the same file/URL while it's still pending confirmation, or within this window after being confirmed, is rejected instead of queued twice (default: `15`) |
+| `PAID_RATE_LIMIT_MAX_FILES` | *(optional)* Paid-tier submission rate limit, files per `RATE_LIMIT_WINDOW_MINUTES`-equivalent window (default: `50` — a much larger allowance than the trial cap, not unlimited, so a compromised/misbehaving paid account still gets real burst protection). `0` disables it |
 
 When `ADMIN_IDS` is set, an admin gets `/admin` — a panel to add a user (choosing how long their access lasts: 1 week / 3 months / 6 months / 1 year / unlimited), renew/change someone's expiry later, or enable/disable a user without losing their record. Users can be identified either by forwarding one of their messages or by typing their numeric id directly (in which case the admin can optionally attach a name/username by hand). This data lives in a small SQLite database (`config_data/access.db`), not a plain file.
 

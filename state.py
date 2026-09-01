@@ -56,3 +56,10 @@ worker_last_seen: dict[str, float] = {}
 # Lists are pruned in place; entries older than the window are dropped on
 # every check.
 user_submission_times: dict[int, list[float]] = {}
+
+# user_id -> {dedup_key: time.time() confirmed}, used by utils/dedup.py to
+# reject re-submitting the same file/URL while an earlier one is still
+# fresh. dedup_key is a Telegram file_unique_id (uploads) or a normalized
+# URL (link submissions). Entries older than
+# Queue.DUPLICATE_SUBMISSION_WINDOW_MINUTES are pruned on every check.
+recent_submission_keys: dict[int, dict[str, float]] = {}

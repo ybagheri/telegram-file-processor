@@ -8,7 +8,7 @@ from dataclasses import asdict
 from telethon import events
 from telethon.errors import FloodWaitError
 
-from config import Heartbeat, Paths, Processing, Telegram
+from config import Heartbeat, Paths, Processing, Queue, Telegram
 from core.constants import MessageType
 from core.delivery import upload_entry
 from core.error_reporting import (
@@ -36,7 +36,7 @@ from services.url_downloader import (
     resolve_download_url,
 )
 from utils.filetype import FileTypeDetector
-from utils.permissions import get_tier_from_payload, max_file_size_for_tier
+from utils.permissions import AccountTier, get_tier_from_payload, max_file_size_for_tier
 from utils.text import strip_excluded
 from utils.url_validation import filename_from_url
 
@@ -265,6 +265,86 @@ def _get_processing_semaphore() -> asyncio.Semaphore:
         )
 
     return _processing_semaphore
+
+
+# Lazily-created global "jobs in flight" semaphore — see
+# _get_total_jobs_semaphore. Separate from _processing_semaphore above:
+# this one wraps the *entire* job (download + processing + upload), not
+# just the ffmpeg/extraction stage, so a burst of confirmed jobs can't
+# all start downloading in parallel with no limit at all.
+_total_jobs_semaphore: asyncio.Semaphore | None = None
+
+
+def _get_total_jobs_semaphore() -> asyncio.Semaphore:
+
+    global _total_jobs_semaphore
+
+    if _total_jobs_semaphore is None:
+
+        _total_jobs_semaphore = asyncio.Semaphore(
+            max(
+                1,
+                Queue.MAX_CONCURRENT_JOBS_TOTAL,
+            )
+        )
+
+    return _total_jobs_semaphore
+
+
+# user_id -> number of jobs currently in flight for that user (from the
+# moment _process_job_safe accepts it, through _deliver_and_cleanup/an
+# early-reject helper). Used only for the per-user active-jobs cap below
+# — separate from utils/rate_limit.py's submission-rate tracking, which
+# counts *new submissions over time*, not *jobs currently running*.
+_active_jobs_by_user: dict[int, int] = {}
+
+
+def _max_active_jobs_for_tier(tier: AccountTier) -> int:
+    """0 means unlimited. Admins are always unlimited, regardless of
+    config — see CLAUDE.md's change log on why this is enforced here
+    rather than trusted to config defaults alone."""
+
+    if tier == AccountTier.ADMIN:
+        return 0
+
+    if tier == AccountTier.PAID:
+        return Queue.MAX_ACTIVE_JOBS_PER_USER_PAID
+
+    return Queue.MAX_ACTIVE_JOBS_PER_USER_TRIAL
+
+
+async def _reject_active_job_limit(payload: dict, limit: int):
+    """Sent when a user already has `limit` jobs actively running and a
+    new one arrives — a clean, immediate rejection with no download, no
+    processing, and no admin alert (this is expected, routine behavior
+    under a real burst, not a bug). Goes straight to the user's own
+    chat; there's no Job yet to carry a target_chat_id preference."""
+
+    user_id = payload.get("user_id")
+
+    logger.info(
+        "Rejecting job for user %s: %d jobs already active (limit %d)",
+        user_id,
+        _active_jobs_by_user.get(user_id, 0),
+        limit,
+    )
+
+    try:
+        await telegram_service.send_error(
+            Protocol.create_error(
+                user_id=user_id,
+                job_id="",
+                message=(
+                    f"⏳ شما در حال حاضر {limit} فایل به‌طور همزمان در حال "
+                    "پردازش دارید. لطفاً صبر کنید تا برخی از آن‌ها تمام "
+                    "شوند و دوباره تلاش کنید."
+                ),
+            )
+        )
+    except Exception:
+        logger.exception(
+            "Failed to notify user %s about the active-job limit", user_id
+        )
 
 
 def _job_report_context(job: Job, operation: str) -> dict:
@@ -1089,12 +1169,39 @@ async def _process_job_safe(payload: dict):
     """Top-level safety net for one bridge job task. process_job now
     reports stage failures itself; this only catches what escaped the
     whole pipeline (and would previously vanish into the log file with
-    the user getting silence)."""
+    the user getting silence).
+
+    Also where the anti-spam/burst-protection checks that apply *before*
+    any Job object exists live: the per-user active-jobs cap (a hard,
+    immediate rejection) and the global in-flight-jobs semaphore (silent
+    queuing, same pattern as _get_processing_semaphore) — see
+    CLAUDE.md's change log."""
+
+    user_id = payload.get("user_id")
+    tier = get_tier_from_payload(payload)
+    limit = _max_active_jobs_for_tier(tier)
+
+    if limit > 0 and user_id is not None:
+
+        if _active_jobs_by_user.get(user_id, 0) >= limit:
+            await _reject_active_job_limit(payload, limit)
+            return
+
+    if user_id is not None:
+        _active_jobs_by_user[user_id] = _active_jobs_by_user.get(user_id, 0) + 1
 
     try:
-        await process_job(payload)
+        async with _get_total_jobs_semaphore():
+            await process_job(payload)
     except Exception as e:
         await _report_payload_failure(payload, e)
+    finally:
+        if user_id is not None:
+            remaining = _active_jobs_by_user.get(user_id, 1) - 1
+            if remaining <= 0:
+                _active_jobs_by_user.pop(user_id, None)
+            else:
+                _active_jobs_by_user[user_id] = remaining
 
 
 async def main():

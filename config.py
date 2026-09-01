@@ -385,6 +385,58 @@ class RateLimiting:
     )
 
 
+class Queue:
+
+    # Global cap on jobs actually in flight (download + processing +
+    # upload) at once, across every user. This is deliberately separate
+    # from Processing.MAX_CONCURRENT_JOBS, which only bounds the
+    # ffmpeg/extraction *processing* stage — without a wider cap, a
+    # burst of confirmed jobs (5, 50, 100+ files) would all start
+    # downloading simultaneously in parallel with no limit at all,
+    # regardless of how tightly processing itself is bounded. Jobs
+    # beyond this cap simply queue on an asyncio.Semaphore (same
+    # silent-queuing behavior as Processing.MAX_CONCURRENT_JOBS already
+    # uses) — they are not rejected, just delayed, in submission order.
+    MAX_CONCURRENT_JOBS_TOTAL = int(
+        os.getenv(
+            "MAX_CONCURRENT_JOBS_TOTAL",
+            "8",
+        )
+    )
+
+    # Unlike the global cap above, a per-user cap on *active* (currently
+    # downloading/processing/uploading) jobs is enforced as a hard,
+    # immediate rejection rather than silent queuing — the point is
+    # specifically to stop one user's burst from monopolizing the global
+    # semaphore and starving every other user, not just to smooth it
+    # out. Admins are always unlimited (see worker.py's
+    # _max_active_jobs_for_tier). 0 disables the limiter for that tier.
+    MAX_ACTIVE_JOBS_PER_USER_TRIAL = int(
+        os.getenv(
+            "MAX_ACTIVE_JOBS_PER_USER_TRIAL",
+            "2",
+        )
+    )
+
+    MAX_ACTIVE_JOBS_PER_USER_PAID = int(
+        os.getenv(
+            "MAX_ACTIVE_JOBS_PER_USER_PAID",
+            "6",
+        )
+    )
+
+    # How long a just-confirmed submission is remembered for duplicate
+    # detection (utils/dedup.py) — re-sending the exact same file/URL
+    # while it's still pending confirmation OR within this window after
+    # being confirmed gets rejected instead of silently queued twice.
+    DUPLICATE_SUBMISSION_WINDOW_MINUTES = int(
+        os.getenv(
+            "DUPLICATE_SUBMISSION_WINDOW_MINUTES",
+            "15",
+        )
+    )
+
+
 class Tiers:
 
     # Account-tier-specific limits. The classification itself lives in
@@ -401,12 +453,15 @@ class Tiers:
         )
     )
 
-    # Paid users' submission rate limit. 0 disables it — paid users are
-    # by default NOT subject to the trial submission caps.
+    # Paid users' submission rate limit. Paid users must not be held to
+    # the trial cap, but "not trial-limited" doesn't have to mean
+    # "unlimited" — a much larger allowance still gives real burst
+    # protection against a compromised or misbehaving paid account
+    # without being noticeable in normal use. 0 disables it entirely.
     PAID_RATE_LIMIT_MAX_FILES = int(
         os.getenv(
             "PAID_RATE_LIMIT_MAX_FILES",
-            "0",
+            "50",
         )
     )
 

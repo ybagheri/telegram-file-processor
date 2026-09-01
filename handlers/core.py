@@ -26,6 +26,7 @@ from aiogram import F, Router
 from aiogram.filters import Command
 from aiogram.types import Message
 
+from config import Queue
 from core.protocol import Protocol
 from handlers.admin import handle_admin_awaited_input
 from handlers.files import handle_file_awaited_input
@@ -41,11 +42,26 @@ from services.url_downloader import (
     describe_download_error,
     resolve_download_url,
 )
-from state import admin_flow, awaiting_state, pending_files, pending_passwords, user_submission_times
+from state import (
+    admin_flow,
+    awaiting_state,
+    pending_files,
+    pending_passwords,
+    recent_submission_keys,
+    user_submission_times,
+)
 from utils.access_control import track_pending_user_if_needed
+from utils.dedup import (
+    dedup_key_for_submission,
+    is_duplicate_pending,
+    is_duplicate_submission,
+    record_submission_key,
+)
 from utils.filetype import FileTypeDetector
 from utils.permissions import (
+    AccountTier,
     check_tier_submission,
+    get_account_tier,
     max_file_size_for_user,
 )
 from utils.url_validation import (
@@ -60,6 +76,31 @@ from utils.url_validation import (
 
 router = Router(name="core")
 catchall_router = Router(name="catchall")
+
+
+def _is_duplicate_submission(user_id: int, key: str) -> bool:
+    """True if `key` (see utils.dedup.dedup_key_for_submission) matches
+    either a still-unconfirmed pending_files entry, or a submission
+    confirmed recently enough to still be inside the dedup window.
+    Admins always bypass — same rule as every other anti-spam check."""
+
+    if not key:
+        return False
+
+    if get_account_tier(user_id) == AccountTier.ADMIN:
+        return False
+
+    if is_duplicate_pending(pending_files, user_id, key):
+        return True
+
+    history = recent_submission_keys.setdefault(user_id, {})
+
+    return is_duplicate_submission(
+        history,
+        key,
+        time.time(),
+        Queue.DUPLICATE_SUBMISSION_WINDOW_MINUTES * 60,
+    )
 
 
 def _rate_limit_text(max_files: int, window_minutes: int) -> str:
@@ -165,6 +206,12 @@ async def handle_url_submission(message: Message, url: str) -> None:
 
     if not allowed:
         await message.answer(_rate_limit_text(max_files, window_minutes))
+        return
+
+    if _is_duplicate_submission(user_id, dedup_key_for_submission(url=url)):
+        await message.answer(
+            "⏳ این لینک همین الان در حال بررسی یا پردازش است. لطفاً کمی صبر کنید."
+        )
         return
 
     filename = filename_from_url(url)
@@ -382,6 +429,12 @@ async def handle_private_message(message: Message):
 
     if not allowed:
         await message.answer(_rate_limit_text(max_files, window_minutes))
+        return
+
+    if _is_duplicate_submission(user_id, dedup_key_for_submission(message=message)):
+        await message.answer(
+            "⏳ این فایل همین الان در حال بررسی یا پردازش است. لطفاً کمی صبر کنید."
+        )
         return
 
     file_name = getattr(file, "file_name", None) or f"file_{message.message_id}"

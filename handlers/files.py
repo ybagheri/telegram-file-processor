@@ -9,16 +9,19 @@ from bot.py via `dp.include_router(router)`.
 not a `@router` handler itself, same pattern as the admin/settings
 awaited-input dispatch functions.
 """
+import time
+
 from aiogram import F, Router
 from aiogram.types import CallbackQuery, Message
 
-from config import Paths, Telegram
+from config import Paths, Queue, Telegram
 from core.constants import MessageType
 from keyboards.files import options_keyboard, quality_keyboard, target_keyboard
 from models.pending_file import PendingFile
 from services.target_resolver import resolve_target
 from services.telegram import telegram_service
-from state import awaiting_state, pending_files
+from state import awaiting_state, pending_files, recent_submission_keys
+from utils.dedup import dedup_key_for_submission, record_submission_key
 from utils.permissions import get_account_tier
 
 router = Router(name="files")
@@ -301,6 +304,12 @@ async def finalize_job(callback: CallbackQuery, pending: PendingFile, pid: str):
         }
 
     await telegram_service.send_job(job_data)
+
+    key = dedup_key_for_submission(pending.source_message, pending.url)
+
+    if key:
+        history = recent_submission_keys.setdefault(pending.user_id, {})
+        record_submission_key(history, key, time.time())
 
     pending_files.pop(pid, None)
 
