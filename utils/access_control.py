@@ -22,6 +22,7 @@ from aiogram.types import Message
 from config import Telegram
 from core.logger import get_logger
 from services.access_store import access_store
+from services.blocked_user_store import blocked_user_store
 from services.pending_user_store import pending_user_store
 from services.telegram import telegram_service
 
@@ -33,7 +34,19 @@ def is_admin(user_id: int) -> bool:
     return user_id in Telegram.ADMIN_IDS
 
 
+def is_blocked(user_id: int) -> bool:
+    # Admins can't lock themselves out by mistake — a block only ever
+    # applies to non-admins.
+    if is_admin(user_id):
+        return False
+    return blocked_user_store.is_blocked(user_id)
+
+
 def is_authorized(user_id: int) -> bool:
+    # A block always wins, regardless of tier/registration status — see
+    # services/blocked_user_store.py.
+    if is_blocked(user_id):
+        return False
     # If no admin has been configured, access control is effectively off
     # — otherwise nobody, including the operator, could ever use the bot.
     if not Telegram.ADMIN_IDS:
@@ -43,6 +56,12 @@ def is_authorized(user_id: int) -> bool:
 
 def not_authorized_text(user_id: int | None = None) -> str:
     contact = Telegram.ADMIN_CONTACT_USERNAME or "مدیر ربات"
+
+    if user_id is not None and is_blocked(user_id):
+        return (
+            "⛔️ دسترسی شما به این ربات مسدود شده است.\n"
+            f"برای پیگیری به {contact} پیام بدهید."
+        )
 
     if user_id is not None:
         info = access_store.get(user_id)
@@ -147,7 +166,7 @@ async def track_pending_user_if_needed(message: Message) -> None:
     times this gets called for them."""
     user_id = message.from_user.id
 
-    if is_admin(user_id) or access_store.get(user_id) is not None:
+    if is_admin(user_id) or access_store.get(user_id) is not None or is_blocked(user_id):
         return
 
     tg_user = message.from_user

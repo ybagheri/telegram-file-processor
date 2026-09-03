@@ -131,7 +131,7 @@ Registered automatically into Telegram's native "/" menu on bot startup (`setMyC
 | `/start`    | Everyone | Welcome message; also registers unregistered users as "pending" for the admin |
 | `/settings` | Everyone | Per-user defaults: quality, watermark, upload target, caption, sort order, filename cleanup, … |
 | `/cancel`   | Everyone | Cancels whatever in-progress input flow (settings prompt, admin flow, file option prompt) you're in |
-| `/admin`    | Admins only | Opens the user-management panel (add/renew/disable/delete authorized users, list, broadcast, stats) |
+| `/admin`    | Admins only | Opens the user-management panel (add/renew/disable/delete authorized users, view pending/started-but-unregistered users, block/unblock, broadcast to any group, list, stats) |
 | `/status`   | Admins only | Reports whether the worker has sent a heartbeat recently — detects a crashed worker without SSHing in |
 
 (URL upload needs no command — just paste a direct link, see the section above.)
@@ -139,6 +139,17 @@ Registered automatically into Telegram's native "/" menu on bot startup (`setMyC
 Files larger than `MAX_FILE_SIZE` (default 5 GiB) are rejected immediately — before anything is downloaded — and you'll get a clear Persian error instead. For large files (over `DISK_SPACE_CHECK_THRESHOLD`, default 256 MiB) the worker also verifies the server actually has enough free disk space (declared size × `DISK_SPACE_SAFETY_FACTOR`) before downloading; if it doesn't, you'll get a "not enough disk space" error rather than a mid-processing failure.
 
 To keep the server responsive, each user can submit at most `RATE_LIMIT_MAX_FILES` (default 5) new files per `RATE_LIMIT_WINDOW_MINUTES` (default 10) — after that you'll get a "please wait" message until the window frees up. Archive-password replies and in-progress option screens are never blocked by this.
+
+### Admin panel
+
+`/admin` opens an inline-keyboard panel covering:
+
+- **Authorized users** — add, renew/change expiry, enable/disable, delete, list.
+- **Pending users** — anyone who has run `/start` but isn't registered shows up here (name, username, id, first-seen time, how many times they've started). Each entry has a one-tap "block" button.
+- **Blocking** — block/unblock any user by id or by forwarding one of their messages, independent of registration status: a block always wins, even over an existing authorized-user record. A blocked user gets a distinct "you've been blocked" message instead of the usual "you're not registered yet" one. Blocked users are also automatically excluded from every broadcast.
+- **Broadcast** — to pending (started but not registered), to registered, or to everyone — three separate buttons, same text-then-confirm flow for all three, with a delivered/failed count afterward (failures are almost always someone having blocked the bot).
+- **Promotional post** — send the bot any message (text, photo, video, or a file with a caption) to set it as "the current post"; from then on, it's automatically copied to a user right after their job finishes successfully (after the "✅ all files sent" notice). Toggle it on/off or delete it from the same submenu; a failed send (e.g. the user blocked the bot) is silent and never affects the job itself.
+- **Stats** — registered/pending counts and conversion rate.
 
 ## Project structure
 

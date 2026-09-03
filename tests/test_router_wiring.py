@@ -114,7 +114,7 @@ async def test_admin_broadcast_callback_reaches_admin_router(api_calls):
     )
     callback = CallbackQuery(
         id="cbq5", from_user=user, chat_instance="abc",
-        data="admin:broadcast_pending", message=cb_message,
+        data="admin:broadcast_start:pending", message=cb_message,
     )
     update = Update(update_id=5, callback_query=callback)
 

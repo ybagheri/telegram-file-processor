@@ -92,13 +92,13 @@ async def test_broadcast_full_flow_sends_only_to_reachable_pending_users(monkeyp
 
     monkeypatch.setattr(bot_module.bot, "send_message", fake_send_message)
 
-    cb = FakeCallback("admin:broadcast_pending", ADMIN_ID)
-    await bot_module.admin_broadcast_pending(cb)
-    assert bot_module.awaiting_state[ADMIN_ID] == "admin_broadcast_pending_text"
+    cb = FakeCallback("admin:broadcast_start:pending", ADMIN_ID)
+    await bot_module.admin_broadcast_start(cb)
+    assert bot_module.awaiting_state[ADMIN_ID] == "admin_broadcast_text"
     assert "3" in cb.message.answers[-1]
 
     msg = FakeMessage(text="پیام تست همگانی")
-    handled = await bot_module.handle_awaited_input(msg, "admin_broadcast_pending_text")
+    handled = await bot_module.handle_awaited_input(msg, "admin_broadcast_text")
     assert handled
     assert ADMIN_ID not in bot_module.awaiting_state
     assert bot_module.admin_flow[ADMIN_ID]["broadcast_text"] == "پیام تست همگانی"
@@ -129,10 +129,10 @@ async def test_broadcast_cancel_sends_nothing(monkeypatch):
         sent_to.append(chat_id)
     monkeypatch.setattr(bot_module.bot, "send_message", fake_send_message)
 
-    cb = FakeCallback("admin:broadcast_pending", ADMIN_ID)
-    await bot_module.admin_broadcast_pending(cb)
+    cb = FakeCallback("admin:broadcast_start:pending", ADMIN_ID)
+    await bot_module.admin_broadcast_start(cb)
     msg = FakeMessage(text="test")
-    await bot_module.handle_awaited_input(msg, "admin_broadcast_pending_text")
+    await bot_module.handle_awaited_input(msg, "admin_broadcast_text")
 
     cb2 = FakeCallback("admin:broadcast_cancel", ADMIN_ID)
     await bot_module.admin_broadcast_cancelled(cb2)
@@ -143,8 +143,8 @@ async def test_broadcast_cancel_sends_nothing(monkeypatch):
 
 @pytest.mark.asyncio
 async def test_broadcast_with_zero_pending_users_is_handled_cleanly():
-    cb = FakeCallback("admin:broadcast_pending", ADMIN_ID)
-    await bot_module.admin_broadcast_pending(cb)
+    cb = FakeCallback("admin:broadcast_start:pending", ADMIN_ID)
+    await bot_module.admin_broadcast_start(cb)
     assert ADMIN_ID not in bot_module.awaiting_state
     assert "هیچ" in cb.message.answers[-1]
 
@@ -180,7 +180,7 @@ async def test_admin_broadcast_button_reaches_admin_router_via_real_dispatch(mon
     from aiogram.types import Update
     callback = CallbackQuery(
         id="cbqX", from_user=user, chat_instance="abc",
-        data="admin:broadcast_pending", message=cb_message,
+        data="admin:broadcast_start:pending", message=cb_message,
     )
     update = Update(update_id=1, callback_query=callback)
 
@@ -224,3 +224,92 @@ async def test_admin_stats_with_no_users_at_all_does_not_crash():
     text = cb.message.answers[-1]
     assert "0" in text
     assert "—" in text  # conversion rate undefined with zero users
+
+
+@pytest.mark.asyncio
+async def test_broadcast_to_registered_users_only(monkeypatch):
+    await access_store.add(801, name="Reg1", expires_at=None)
+    await access_store.add(802, name="Reg2", expires_at=None)
+    await pending_user_store.record_start(803, first_name="Pending")
+
+    sent_to = []
+
+    async def fake_send_message(chat_id, text=None, **kw):
+        sent_to.append(chat_id)
+
+    monkeypatch.setattr(bot_module.bot, "send_message", fake_send_message)
+
+    cb = FakeCallback("admin:broadcast_start:registered", ADMIN_ID)
+    await bot_module.admin_broadcast_start(cb)
+    assert "ثبت‌نام‌شده" in cb.message.answers[-1]
+
+    msg = FakeMessage(text="سلام کاربران ثبت‌نام‌شده")
+    await bot_module.handle_awaited_input(msg, "admin_broadcast_text")
+
+    confirm_markup = msg.markups[-1]
+    confirm_cb_data = confirm_markup.inline_keyboard[0][0].callback_data
+    cb2 = FakeCallback(confirm_cb_data, ADMIN_ID)
+    await bot_module.admin_broadcast_confirm(cb2)
+
+    assert set(sent_to) == {801, 802}
+
+
+@pytest.mark.asyncio
+async def test_broadcast_to_all_users_covers_both_groups(monkeypatch):
+    await access_store.add(901, name="Reg", expires_at=None)
+    await pending_user_store.record_start(902, first_name="Pend")
+
+    sent_to = []
+
+    async def fake_send_message(chat_id, text=None, **kw):
+        sent_to.append(chat_id)
+
+    monkeypatch.setattr(bot_module.bot, "send_message", fake_send_message)
+
+    cb = FakeCallback("admin:broadcast_start:all", ADMIN_ID)
+    await bot_module.admin_broadcast_start(cb)
+
+    msg = FakeMessage(text="به همه")
+    await bot_module.handle_awaited_input(msg, "admin_broadcast_text")
+
+    confirm_markup = msg.markups[-1]
+    cb2 = FakeCallback(confirm_markup.inline_keyboard[0][0].callback_data, ADMIN_ID)
+    await bot_module.admin_broadcast_confirm(cb2)
+
+    assert set(sent_to) == {901, 902}
+
+
+@pytest.mark.asyncio
+async def test_blocked_users_are_excluded_from_every_broadcast_target(monkeypatch):
+    from services.blocked_user_store import blocked_user_store
+
+    await access_store.add(1001, name="RegBlocked", expires_at=None)
+    await access_store.add(1002, name="RegOK", expires_at=None)
+    await pending_user_store.record_start(1003, first_name="PendBlocked")
+    await pending_user_store.record_start(1004, first_name="PendOK")
+
+    await blocked_user_store.block(1001)
+    await blocked_user_store.block(1003)
+
+    try:
+        sent_to = []
+
+        async def fake_send_message(chat_id, text=None, **kw):
+            sent_to.append(chat_id)
+
+        monkeypatch.setattr(bot_module.bot, "send_message", fake_send_message)
+
+        cb = FakeCallback("admin:broadcast_start:all", ADMIN_ID)
+        await bot_module.admin_broadcast_start(cb)
+
+        msg = FakeMessage(text="test")
+        await bot_module.handle_awaited_input(msg, "admin_broadcast_text")
+
+        confirm_markup = msg.markups[-1]
+        cb2 = FakeCallback(confirm_markup.inline_keyboard[0][0].callback_data, ADMIN_ID)
+        await bot_module.admin_broadcast_confirm(cb2)
+
+        assert set(sent_to) == {1002, 1004}
+    finally:
+        await blocked_user_store.unblock(1001)
+        await blocked_user_store.unblock(1003)

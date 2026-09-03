@@ -20,6 +20,7 @@ from config import Telegram
 from core.constants import MessageType
 from core.logger import get_logger
 from core.protocol import Protocol
+from services.promo_post_store import promo_post_store
 from services.settings_store import settings_store
 from services.telegram import telegram_service
 from state import job_folder_links, pending_passwords, worker_last_seen
@@ -216,5 +217,24 @@ async def handle_bridge_message(message: Message):
             )
         except Exception:
             logger.exception("Failed to send completion notice for job %s", job_id)
+
+        post = promo_post_store.get()
+
+        if post and post["enabled"]:
+            try:
+                await bot.copy_message(
+                    user_id,
+                    from_chat_id=post["source_chat_id"],
+                    message_id=post["source_message_id"],
+                )
+            except Exception:
+                # Best-effort advertising, never allowed to look like a
+                # job failure to the user — most common cause is simply
+                # the user having blocked the bot.
+                logger.warning(
+                    "Could not deliver the promo post to user %s after job %s",
+                    user_id,
+                    job_id,
+                )
 
         return

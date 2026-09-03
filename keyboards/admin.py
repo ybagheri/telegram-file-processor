@@ -14,7 +14,14 @@ def admin_panel_keyboard() -> InlineKeyboardMarkup:
         [InlineKeyboardButton(text="⏳ تمدید / تغییر انقضا", callback_data="admin:renew_user")],
         [InlineKeyboardButton(text="🚫 فعال/غیرفعال کردن کاربر", callback_data="admin:toggle_user")],
         [InlineKeyboardButton(text="🗑 حذف کامل کاربر", callback_data="admin:delete_user")],
-        [InlineKeyboardButton(text="📢 پیام همگانی به ثبت‌نام‌نشده‌ها", callback_data="admin:broadcast_pending")],
+        [InlineKeyboardButton(text="👥 کاربران استارت‌کرده (ثبت‌نام‌نشده)", callback_data="admin:list_pending")],
+        [InlineKeyboardButton(text="⛔️ بلاک کردن کاربر", callback_data="admin:block_user")],
+        [InlineKeyboardButton(text="✅ آنبلاک کردن کاربر", callback_data="admin:unblock_user")],
+        [InlineKeyboardButton(text="📋 لیست کاربران بلاک‌شده", callback_data="admin:list_blocked")],
+        [InlineKeyboardButton(text="📢 پیام همگانی به ثبت‌نام‌نشده‌ها", callback_data="admin:broadcast_start:pending")],
+        [InlineKeyboardButton(text="📢 پیام همگانی به ثبت‌نام‌شده‌ها", callback_data="admin:broadcast_start:registered")],
+        [InlineKeyboardButton(text="📢 پیام همگانی به همه‌ی کاربران", callback_data="admin:broadcast_start:all")],
+        [InlineKeyboardButton(text="📝 پست تبلیغاتی پس از اتمام کار", callback_data="admin:promo_menu")],
         [InlineKeyboardButton(text="📊 آمار کاربران", callback_data="admin:stats")],
     ])
 
@@ -28,6 +35,25 @@ def duration_keyboard(purpose: str, target_id: int | None = None) -> InlineKeybo
             else f"admin:dur:{purpose}:{days}:{target_id}"
         )
         rows.append([InlineKeyboardButton(text=label, callback_data=callback_data)])
+    return InlineKeyboardMarkup(inline_keyboard=rows)
+
+
+def promo_post_menu_keyboard(has_post: bool, enabled: bool) -> InlineKeyboardMarkup:
+    rows = [
+        [InlineKeyboardButton(
+            text="📝 تنظیم/تغییر پست" if has_post else "📝 تنظیم پست",
+            callback_data="admin:promo_set",
+        )],
+    ]
+
+    if has_post:
+        rows.append([InlineKeyboardButton(text="👁 پیش‌نمایش پست فعلی", callback_data="admin:promo_preview")])
+        toggle_label = "⏸ غیرفعال کردن ارسال خودکار" if enabled else "▶️ فعال کردن ارسال خودکار"
+        rows.append([InlineKeyboardButton(text=toggle_label, callback_data="admin:promo_toggle")])
+        rows.append([InlineKeyboardButton(text="🗑 حذف پست تبلیغاتی", callback_data="admin:promo_delete")])
+
+    rows.append([InlineKeyboardButton(text="🔙 بازگشت", callback_data="admin:panel")])
+
     return InlineKeyboardMarkup(inline_keyboard=rows)
 
 
